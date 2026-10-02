@@ -1,0 +1,59 @@
+global:
+  # 5s so a provider fallback or a stuck background task shows up while the turn is still
+  # being answered, rather than a scrape-interval later. The registry is small enough that
+  # the extra churn is not worth trading away that resolution.
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  # Alert evaluation interval. Several alerts in the rule file use `for:` clauses as short as
+  # zero (AllProvidersExhausted fires on the next evaluation after the increment), so this
+  # value is the real bound on how quickly a page can go out. Keep it well under the interval
+  # on which a missing page would cost a student an answer.
+  evaluation_interval: 15s
+  external_labels:
+    monitor: limbot
+    service: limbot
+
+# Alert rules are mounted from ./monitoring/prometheus by docker-compose.
+#
+# The path is absolute on purpose. Prometheus resolves relative rule_files paths against its
+# working directory, not against this file, which is /prometheus inside the official image —
+# not /etc/prometheus where the config lives. A relative path here appears to work in some
+# setups and silently loads nothing in others, and a rule file that fails to load produces no
+# error you would notice. An absolute path is unambiguous.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Alertmanager receives every alerting and resolved alert and does the grouping, inhibition
+# and routing defined in monitoring/alertmanager/alertmanager.yml.template, which is rendered by
+# render-config.sh at Alertmanager's container start. Keep this host reachable: if Prometheus
+# cannot reach Alertmanager, alerts are evaluated and then discarded, so the rule file looks
+# healthy while nothing is ever delivered.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager:9093"]
+
+  - job_name: limbot
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["web:8000"]
+        labels:
+          service: limbot
+          component: api
+
+  - job_name: qdrant
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["qdrant:6333"]
+        labels:
+          service: qdrant
+          component: vector-store

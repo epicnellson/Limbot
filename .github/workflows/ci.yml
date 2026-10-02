@@ -1,0 +1,231 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Manual run with "run_evals": true forces the evaluation suite (e.g. after seeding fresh
+  # course material into Qdrant, or when provider behaviour changed upstream).
+  workflow_dispatch:
+    inputs:
+      run_evals:
+        type: boolean
+        default: false
+        description: "Run the synthetic evaluation suite against live providers"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: "Quality: ruff, mypy, pytest"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Ruff lint
+        run: uv run --no-sync ruff check app tests
+      - name: Ruff format
+        run: uv run --no-sync ruff format --check app tests
+      - name: Mypy
+        run: uv run --no-sync mypy app
+      - name: Pytest
+        run: uv run --no-sync pytest -q
+      # The alert rules are validated by the tools that actually parse them. tests/test_alert_rules.py
+      # catches rules that reference metrics or labels the application does not emit, but it cannot
+      # check PromQL grammar, and only promtool can. Both commands are non-zero on any syntax error.
+      - name: Validate alert rules with promtool
+        run: |
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/monitoring/prometheus:/rules:ro" \
+            prom/prometheus:v3.13.3 check rules /rules/alert_rules.yml
+      - name: Validate alertmanager config with amtool
+        run: |
+          # The config is a template, so it is rendered before being validated. Validating the
+          # template directly would either fail on the ${VAR} placeholders or, worse, pass while
+          # checking a file the container never reads.
+          #
+          # Defaults are used deliberately: those are the values an unwired deployment actually
+          # gets, so this also proves the shipped placeholders are ones Alertmanager accepts,
+          # rather than only checking a config no deployment would ever run.
+          #
+          # Rendered output goes to a host-mounted directory, not to /tmp inside the container,
+          # because the container's own filesystem is discarded when it exits and the next step
+          # would then mount a nonexistent path.
+          #
+          # ALERTMANAGER_BIN=/bin/false makes the script render, warn, and then fail on exec,
+          # which is past everything under test and avoids starting a real Alertmanager. The
+          # `|| true` is only for that expected exec failure: a failure to render, an unreadable
+          # template or an unwritable output directory all exit non-zero and must fail the job,
+          # and the amtool check below catches a missing output file regardless.
+          WORK="$(mktemp -d)"
+          render() {
+            docker run --rm \
+              -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" \
+              -v "$WORK:/out" \
+              -e ALERTMANAGER_TEMPLATE=/etc/alertmanager/alertmanager.yml.template \
+              -e ALERTMANAGER_CONFIG="/out/$1.yml" \
+              -e ALERTMANAGER_RENDERER="$2" \
+              -e ALERTMANAGER_BIN=/bin/false \
+              --entrypoint sh \
+              prom/alertmanager:v0.28.1 /etc/alertmanager/render-config.sh || true
+          }
+          validate() {
+            docker run --rm \
+              --entrypoint amtool \
+              -v "$WORK:/out:ro" \
+              prom/alertmanager:v0.28.1 check-config "/out/$1.yml"
+          }
+
+          # Render with "auto", the value compose actually uses, and validate that. This is the
+          # config the container will really run.
+          render rendered auto
+          validate rendered
+
+          # The fallback only matters if envsubst exists in the image; busybox does not ship it,
+          # so this is a genuine possibility rather than a formality. When it is absent, awk is
+          # what "auto" already selected above and there is nothing further to compare.
+          if docker run --rm --entrypoint sh prom/alertmanager:v0.28.1 -c 'command -v envsubst'; then
+            render rendered-envsubst envsubst
+            validate rendered-envsubst
+
+            # Compared only after both files are confirmed present. If a render silently produced
+            # nothing, both sides of the diff would be empty and diff would report success, turning
+            # a broken render into a green build.
+            for f in rendered rendered-envsubst; do
+              if [ ! -s "$WORK/$f.yml" ]; then
+                echo "::error::$WORK/$f.yml is missing or empty; the renderer produced nothing."
+                exit 1
+              fi
+            done
+
+            # Line-ending differences are normalised first: envsubst built for Windows emits CRLF
+            # while the Linux binaries emit LF, and neither is a real difference.
+            diff <(tr -d '\r' <"$WORK/rendered.yml") <(tr -d '\r' <"$WORK/rendered-envsubst.yml")
+          else
+            echo "envsubst is absent from the image, as expected for busybox; awk was validated."
+          fi
+      - name: Validate prometheus config with promtool
+        run: |
+          # The rules directory is mounted at the absolute path prometheus.yml references.
+          # Without this second mount, check config fails on the missing rule_files glob, which
+          # is a false negative: the config is fine, the path is just not populated in here.
+          docker run --rm \
+            --entrypoint promtool \
+            -v "$PWD/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+            -v "$PWD/monitoring/prometheus:/etc/prometheus/rules:ro" \
+            prom/prometheus:v3.13.3 \
+            check config --config.file=/etc/prometheus/prometheus.yml
+
+  filter:
+    name: "Detect whether the evaluation suite must run"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_evals: ${{ steps.changes.outputs.eval_paths == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_evals) }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            eval_paths:
+              - 'app/config.py'
+              - 'app/eval/**'
+              - 'app/llm/**'
+              - 'app/services/answer.py'
+              - 'app/conversation/**'
+
+  evals:
+    name: "Synthetic evaluation suite"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [quality, filter]
+    # The suite gates prompt changes: it is required on PRs that touch the prompt or the answer
+    # path, so a regression blocks the merge rather than shipping silently.
+    if: needs.filter.outputs.run_evals == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Run the evaluation suite
+        env:
+          AI_ENABLED: "true"
+          RAG_ENABLED: "false"
+          QDRANT_REQUIRED: "false"
+          WHATSAPP_SIGNATURE_REQUIRED: "false"
+          GROQ_API_KEY: ${{ secrets.EVAL_GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+        run: uv run --no-sync python -m app.eval --min-pass-rate 0.8
+      - name: Upload the evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: EVAL_REPORT.md
+          if-no-files-found: warn
+
+  build:
+    name: "Build and push image"
+    runs-on: ubuntu-latest
+    needs: [quality]
+    timeout-minutes: 30
+    # Only this job pushes to GHCR. Workflow-level token permissions are granted to every job
+    # including the ones that run untrusted PR code, so the write scope lives here instead.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: "Deploy to Fly.io"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [quality, build]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only

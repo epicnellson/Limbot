@@ -1,0 +1,436 @@
+# LimkoBot Pro — Prometheus alert rules.
+#
+# Loaded by prometheus.yml and evaluated every 15s (the global evaluation_interval).
+# Alerts are sent to Alertmanager, which groups, deduplicates and routes them.
+#
+# Every expression below was written against the metric names and labels the application
+# actually emits. The four alerts requested for this work were specified against names that
+# do not exist in the code; the real ones are used here and the substitutions are recorded at
+# the bottom of this file under "Name substitutions".
+#
+# Conventions used throughout:
+#   * severity=critical  pages a human. Reserved for "students are getting nothing".
+#   * severity=warning   is worth looking at during working hours, not worth waking anyone.
+#   * keep_firing_for    stops a flapping alert from paging repeatedly.
+#   * every rule carries a runbook_url and a summary that says what to DO, not just what
+#     happened, because this file is read by whoever is on call when they are least able to
+#     guess.
+
+groups:
+  # ---------------------------------------------------------------------------
+  # Availability of the metrics pipeline itself.
+  #
+  # These come first on purpose. Every alert below is driven by a series scraped from the
+  # web container, so if the container is down the series simply stops arriving and every
+  # other rule silently evaluates to "no data" and stays quiet. Without a TargetDown alert
+  # a full outage is indistinguishable from a healthy system with no traffic, which is the
+  # exact silent failure this whole alerting layer exists to prevent.
+  # ---------------------------------------------------------------------------
+  - name: limbot-availability
+    rules:
+      - alert: TargetDown
+        expr: up{job="limbot"} == 0
+        for: 1m
+        keep_firing_for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "limbot is not being scraped"
+          description: >-
+            Prometheus has failed to scrape the limbot container for more than a minute
+            (job="limbot"). Every other alert in this file is fed by this target, so they are
+            all currently blind. Check container health and that port 8000 is serving
+            /metrics.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # The deployment is scrapable and healthy but Meta deliveries have stopped arriving.
+      #
+      # This watches inbound message volume rather than HTTP request volume, which is a
+      # deliberate distinction. limbot_http_requests_total is never zero in a healthy
+      # deployment because the Docker and Fly health checks are HTTP requests too, so a
+      # "no HTTP traffic" rule would sit permanently satisfied and prove nothing. What
+      # actually matters is whether student messages are arriving, and that has its own
+      # counter.
+      #
+      # Expects false positives in an environment that legitimately receives no real
+      # messages. Silence it locally with a time-limited silence rather than commenting the
+      # rule out.
+      - alert: NoInboundTraffic
+        expr: |
+          sum(rate(limbot_whatsapp_messages_total{direction="inbound"}[15m])) == 0
+          and on()
+          sum(rate(limbot_webhook_events_total[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Webhooks are arriving but no inbound student messages are being read"
+          description: >-
+            The endpoint is being reached and deliveries are being acknowledged, yet no
+            inbound messages have been recorded for 15 minutes. The most likely cause is that
+            every delivery is being rejected before it is parsed — an invalid signature after
+            a WHATSAPP_APP_SECRET rotation, or a payload this version cannot validate. Cross
+            check the result label on limbot_webhook_events_total, which distinguishes
+            accepted from rejected deliveries. If this deployment is not expected to receive
+            real traffic, silence this alert.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # The readiness probe on /readyz is not scraped as a metric, so this stands in for it.
+      # The failure /readyz exists to catch is "the process is up but cannot do its job", and
+      # that state is directly observable from the data: webhooks are arriving, so the app is
+      # receiving work, but no answer has ever been produced from it. That is precisely the
+      # condition that makes /readyz return 503, detected here without a blackbox exporter.
+      - alert: NoAnswersProduced
+        expr: |
+          sum(rate(limbot_whatsapp_messages_total{direction="inbound"}[15m])) > 0
+          and on()
+          sum(rate(limbot_answers_total[15m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+          team: platform
+          page: "true"
+        annotations:
+          summary: "Inbound messages arriving but no answers are being produced"
+          description: >-
+            The bot is receiving student messages but has produced no answers for 10 minutes.
+            This is the state /readyz reports as not_ready: the process is healthy and scrapable
+            but cannot answer. The usual causes are AI_ENABLED being false with no provider key
+            configured, or every tier's circuit being open. Students are being messaged and
+            receiving nothing useful in return.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+  # ---------------------------------------------------------------------------
+  # Provider tiers. This is the group that decides whether students get answers.
+  # ---------------------------------------------------------------------------
+  - name: limbot-llm
+    interval: 15s
+    rules:
+      # The only alert in this file that fires the moment something happens. A student whose
+      # message could not be answered at all is a lost interaction, and there is no batch job
+      # or dashboard review that substitutes for noticing it immediately.
+      #
+      # increase() is used rather than a raw counter delta so the rule survives the counter
+      # resetting to zero on every deploy, which is what a container restart looks like here.
+      - alert: AllProvidersExhausted
+        expr: sum by (cause) (increase(limbot_all_providers_exhausted_total[2m])) > 0
+        # Deliberately zero: the requested behaviour is to fire immediately, and there is no
+        # value in waiting to confirm that a completion with no provider left behind is still
+        # a completion with no provider left behind.
+        for: 0m
+        # Hold the alert open after the burst ends so a student retrying does not re-page, and
+        # so the notification carries the full count of the burst rather than a single event.
+        keep_firing_for: 10m
+        labels:
+          severity: critical
+          team: platform
+          page: "true"
+        annotations:
+          summary: >-
+            No provider tier could answer ({{ $labels.cause }}): every completion in the last
+            2 minutes failed
+          description: >-
+            cause="{{ $labels.cause }}". If cause="exhausted" every configured tier failed or
+            was skipped, which is a provider or credential outage. If cause="unconfigured" no
+            tier has a key at all, so the deployment is missing GROQ_API_KEY, GEMINI_API_KEY
+            or TIER3_BASE_URL. Students are receiving the "I did not understand that" fallback
+            and getting no real answer. Check the circuit states on /readyz, then the provider
+            status pages.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # Tier 1 degrading. This is the early warning that precedes AllProvidersExhausted, and
+      # it exists so someone can fix Groq before the backup tier runs out too.
+      #
+      # Two independent conditions, either sufficient:
+      #   1. any movement away from groq sustained over 5 minutes
+      #   2. groq's own error rate above 50%
+      - alert: PrimaryLLMDown
+        expr: |
+          (
+            sum(rate(limbot_provider_fallbacks_total{from_provider="groq"}[5m])) > 0
+          )
+          or
+          (
+            sum(rate(limbot_llm_calls_total{provider="groq",result="error"}[5m]))
+            /
+            clamp_min(sum(rate(limbot_llm_calls_total{provider="groq"}[5m])), 0.0001)
+            > 0.5
+          )
+        for: 5m
+        keep_firing_for: 15m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Groq (tier 1) is failing; traffic is falling through to the backup tier"
+          description: >-
+            Over the last 5 minutes either groq has been falling through to another tier, or
+            more than half of groq's calls have errored. The backup tier is carrying all
+            traffic, so there is no spare capacity left. Current fallback rate:
+            {{ $value | humanize }} per second. Check Groq status and quota, and confirm
+            GEMINI_API_KEY is set so tier 2 can actually take over.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # A tier that is retrying rather than failing outright still burns quota and still adds
+      # latency to every student waiting on it.
+      - alert: ProviderRateLimited
+        expr: sum by (provider) (rate(limbot_llm_calls_total{result="rate_limited"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "{{ $labels.provider }} is rate limiting (HTTP 429)"
+          description: >-
+            Provider {{ $labels.provider }} has been returning 429 for at least 10 minutes at
+            {{ $value | humanize }} per second. Sustained 429s mean the quota is exhausted or
+            the concurrency sent to this tier exceeds the plan limit. Check quota and consider
+            whether background_max_concurrency is being driven too hard at this tier.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      - alert: CircuitBreakerOpen
+        expr: limbot_circuit_state{state="open"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Circuit breaker for {{ $labels.provider }} is open"
+          description: >-
+            The circuit for {{ $labels.provider }} has been open for over 5 minutes, so this
+            tier is being skipped without a network call. Requests are failing over to the
+            next tier. An open circuit that never closes means the provider is still broken;
+            recovery only gets retried every ai_circuit_recovery_seconds.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+  # ---------------------------------------------------------------------------
+  # Latency.
+  # ---------------------------------------------------------------------------
+  - name: limbot-latency
+    rules:
+      # Read this before assuming the obvious. This fires on LLM completion latency, not on
+      # HTTP request latency, and that choice is deliberate.
+      #
+      # The webhook endpoint acknowledges Meta and then hands the real work to a detached
+      # background task (app/services/message_handler.py). So limbot_http_request_duration_seconds
+      # only ever measures the acknowledgement, which completes in single-digit milliseconds no
+      # matter how long the student waits for a reply. An HTTP-latency alert here would stay
+      # permanently green while students waited a minute for an answer, which is worse than no
+      # alert at all because it manufactures confidence.
+      #
+      # The time a student actually waits is the completion itself, so that is what this
+      # alerts on.
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(
+            0.90,
+            sum by (le) (rate(limbot_llm_call_duration_seconds_bucket[5m]))
+          ) > 4.0
+        for: 5m
+        keep_firing_for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "p90 LLM completion latency above 4s for 5 minutes"
+          description: >-
+            The 90th percentile completion has been slower than 4 seconds for 5 minutes
+            (now {{ $value | humanizeDuration }}). Students are waiting on visibly slow
+            answers. Usually this means tier 1 is degraded and requests are being served by a
+            slower backup, so cross-check PrimaryLLMDown. Note the buckets for this histogram
+            are coarse above 30s, so the reported value is an upper bound once p90 exceeds 30.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # The acknowledgement path is a different service level with a different deadline: Meta
+      # stops retrying after 20s and starts delivering duplicates. It should never be slow,
+      # so this threshold is far tighter than the 4s used for completions. This is the alert
+      # that would catch the detached-task machinery breaking and blocking the event loop.
+      - alert: WebhookAckSlow
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le, route) (
+              rate(limbot_http_request_duration_seconds_bucket{route="/webhooks/whatsapp"}[5m])
+            )
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Webhook acknowledgement p99 above 1s"
+          description: >-
+            Acknowledging Meta is taking longer than a second at p99 (now
+            {{ $value | humanizeDuration }}). This route does nothing but validate a signature
+            and hand off to a background task, so it should be milliseconds. Meta retries any
+            delivery that is not answered within 20s, so a sustained slow acknowledgement turns
+            into duplicate deliveries. Check background task saturation and event loop delay.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+  # ---------------------------------------------------------------------------
+  # Security.
+  # ---------------------------------------------------------------------------
+  - name: limbot-security
+    rules:
+      # Meta signs every delivery correctly, so in normal operation this counter is exactly
+      # zero. Any sustained rate is therefore anomalous by definition, which is why the
+      # threshold is a small absolute rate rather than a percentage of total traffic: a
+      # percentage baseline would be meaningless when the "good" value is zero.
+      #
+      # Two failure modes are counted together because both mean someone is presenting forged
+      # or misrouted deliveries to the endpoint:
+      #   * result="invalid_signature"          a POST whose HMAC did not verify
+      #   * kind="verification",result="rejected"  a subscription handshake with a bad token
+      #
+      # Note this cannot fire when WHATSAPP_SIGNATURE_REQUIRED is false, which is the local
+      # development default: with verification off the request is accepted before the counter
+      # is reached. Silence here therefore means "verification is off or not being scraped",
+      # not "nobody is attacking us". Confirm WHATSAPP_SIGNATURE_REQUIRED is true in the
+      # deployed environment.
+      - alert: WebhookVerificationFailures
+        expr: |
+          (
+            sum(rate(limbot_webhook_events_total{result="invalid_signature"}[5m]))
+            +
+            sum(rate(limbot_webhook_events_total{kind="verification",result="rejected"}[5m]))
+          ) > 0.05
+          and on()
+          sum(rate(limbot_webhook_events_total[5m])) > 0
+        for: 5m
+        keep_firing_for: 15m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Webhook signature verification failing at {{ $value | humanize }}/s"
+          description: >-
+            Deliveries are being rejected because their HMAC signature does not verify, at
+            {{ $value | humanize }} per second. The benign explanation is a rotated
+            WHATSAPP_APP_SECRET that no longer matches the one configured in Meta, which
+            silently stops every inbound message from being processed. The serious
+            explanation is a forged delivery attempt. Check whether the app secret changed
+            recently before treating this as an attack; the rejected client address is in the
+            application logs, not in this metric, so grep the logs for
+            "rejected webhook with an invalid signature".
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+  # ---------------------------------------------------------------------------
+  # Capacity and saturation.
+  # ---------------------------------------------------------------------------
+  - name: limbot-capacity
+    rules:
+      # The background task pool is a single global semaphore with no per-sender fairness, so
+      # it is the component most likely to become the bottleneck, and the one whose ceiling is
+      # least likely to match reality. background_max_concurrency defaults to 8. Sustained
+      # saturation means students are queueing, and because work is queued rather than rejected,
+      # nothing else in this file will show it: answers will simply arrive late, which is what
+      # HighLatency above is watching for.
+      - alert: BackgroundTasksSaturated
+        expr: limbot_background_tasks_inflight >= 7
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Background task pool near saturation ({{ $value }} in flight)"
+          description: >-
+            {{ $value }} of 8 permitted background tasks have been continuously in flight for
+            5 minutes. Inbound messages are queueing instead of being answered, so students
+            are waiting. The pool is a single semaphore with no per-sender fairness, so one
+            sender flooding the bot can occupy every slot and starve everyone else; check for
+            a flood before simply raising background_max_concurrency.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # Meta retries anything it does not get a 2xx for, and redeliveries are dropped by the
+      # in-process dedupe cache. A rising duplicate rate therefore means deliveries are being
+      # retried, which means either the ack is slow or the instance is restarting mid-turn.
+      - alert: DuplicateWebhookStorm
+        expr: rate(limbot_webhook_duplicates_total[15m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Meta is redelivering webhooks ({{ $value | humanize }}/s dropped as duplicates)"
+          description: >-
+            Deliveries are arriving that were already processed, at {{ $value | humanize }} per
+            second, and are being dropped correctly by the dedupe cache. This is a symptom, not
+            a fault: Meta is retrying because acknowledgements were slow or failed. Correlate
+            with WebhookAckSlow and with deploys, since the dedupe cache is in-process and does
+            not survive a restart.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+      # Unbounded growth of the tracked-conversation gauge is the signature of the memory
+      # exhaustion path being reached. conversation_max_conversations caps it at 500 by
+      # default, so approaching that cap means the LRU is evicting live conversations and
+      # students are losing context.
+      - alert: ConversationMemoryPressure
+        expr: limbot_conversations_tracked >= 450
+        for: 15m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "Tracked conversations at {{ $value }} of 500"
+          description: >-
+            The conversation store is holding {{ $value }} senders against a cap of 500, so
+            the LRU is close to evicting live conversations. Students whose conversations are
+            evicted mid-thread will get answers with no memory of the earlier messages. If
+            this is sustained, raise conversation_max_conversations, or investigate whether a
+            single sender is creating large numbers of them.
+          runbook_url: https://github.com/limbot/limbot/blob/main/monitoring/prometheus/alert_rules.yml
+
+
+# =============================================================================
+# Name substitutions applied to the requested alert list
+# =============================================================================
+#
+# The alert specifications referenced metric names that the application does not emit. Rather
+# than write rules that can never fire, each was mapped onto the real metric. This is recorded
+# here so the change is reviewable rather than silent.
+#
+# 1. Metric prefix
+#    Requested: limkobot_*
+#    Actual:    limbot_*
+#    The application prefixes every metric with `limbot` (app/metrics.py). `limkobot` appears
+#    nowhere in the codebase and a rule referencing it would evaluate to an empty vector, so
+#    every alert would sit permanently inactive and look configured.
+#
+# 2. PrimaryLLMDown
+#    Requested: limkobot_provider_fallback_total{provider="groq"}
+#    Actual:    limbot_provider_fallbacks_total{from_provider="groq", to_provider=..., reason=...}
+#    Three differences: the counter is plural (`fallbacks`), the prefix is `limbot`, and the
+#    label is `from_provider`, not `provider`. A fallback is a move *from* one tier *to*
+#    another, so both endpoints are labelled; the rule filters on `from_provider="groq"` to
+#    catch exactly the primary tier degrading.
+#
+# 3. AllProvidersExhausted
+#    Requested: limkobot_all_providers_exhausted_total
+#    Actual:    limbot_all_providers_exhausted_total  (added as part of this work)
+#    This metric did not exist and could not be derived from anything already emitted.
+#    limbot_provider_fallbacks_total deliberately stops counting one tier before the end of the
+#    chain, so "the backup saved it" is recorded while "nothing could answer" was recorded
+#    nowhere at all. That is the correct behaviour for a fallback counter and the wrong
+#    behaviour for an outage detector, which is why this is a separate counter rather than a
+#    query over the existing one. It is incremented at both raise sites of NoProviderAvailable
+#    and carries a `cause` label distinguishing an outage (`exhausted`) from a deployment
+#    mistake (`unconfigured`), because those two demand different responses.
+#
+# 4. WebhookVerificationFailures
+#    Requested: an unspecified "HMAC verification failure rate"
+#    Actual:    limbot_webhook_events_total{result="invalid_signature"}
+#               limbot_webhook_events_total{kind="verification",result="rejected"}
+#    HMAC verification failures are already instrumented at app/api/routes/webhooks.py:68 and
+#    :39, so no new metric was needed. Both the POST signature check and the GET subscription
+#    handshake are covered, since both reject unauthenticated callers.
+#
+# 5. HighLatency
+#    Requested: "p90 latency exceeds 4.0 seconds"
+#    Actual:    p90 of limbot_llm_call_duration_seconds
+#    The threshold and duration are as requested. The series is not, and the reasoning is in
+#    the comment on the rule: the webhook route returns before any AI work happens, so HTTP
+#    latency measures an acknowledgement that is always fast and would never cross 4s. A
+#    separate WebhookAckSlow alert covers the acknowledgement path with a p99 > 1s threshold,
+#    which is the service level that actually matters for Meta's retry behaviour.

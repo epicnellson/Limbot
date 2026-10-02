@@ -1,0 +1,30 @@
+# environments
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+
+# tooling caches
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+
+# test / local artifact staging
+TestResults/
+EVAL_REPORT.md
+
+# Internal engineering audit: grades this codebase PARTIAL/FAIL in several areas and is written
+# for maintainers, not for the public repo.
+SYSTEM_REVIEW_REPORT.md
+
+# editors
+.idea/
+.vscode/
+*.swp

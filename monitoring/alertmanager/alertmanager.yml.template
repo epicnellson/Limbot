@@ -1,0 +1,188 @@
+# LimkoBot Pro — Alertmanager configuration TEMPLATE.
+#
+# This file is not read by Alertmanager. It is rendered by render-config.sh at container start,
+# which substitutes the environment variables below and writes the result to a real config file.
+#
+# -----------------------------------------------------------------------------
+# WHY A TEMPLATE
+# -----------------------------------------------------------------------------
+# Alertmanager has no environment variable expansion of its own. It reads its config file and
+# nothing else, so a value that differs per environment has to be substituted before the process
+# starts. Doing it at startup rather than by hand means the destination is never committed, which
+# is the only way an API key can stop ending up in version control.
+#
+# -----------------------------------------------------------------------------
+# THE SUBSTITUTION
+# -----------------------------------------------------------------------------
+# render-config.sh tries envsubst first and falls back to an awk renderer, because the Prometheus
+# images are busybox-based and busybox does not ship envsubst (it comes from GNU gettext). Either
+# path produces byte-identical output for this file.
+#
+# Three consequences worth knowing:
+#
+#  1. Every ${...} in this file is substituted, including any inside these comments. That is why
+#     variables are referred to by bare name in the prose below rather than with braces: a
+#     literal brace reference in a comment would be replaced by its value and the comment would
+#     quietly lie to whoever reads it next.
+#
+#  2. Alertmanager's own Go templates use {{ }} and are left untouched, so the email subject
+#     header below still works. The two syntaxes do not collide.
+#
+#  3. Every placeholder is inside YAML quotes. Without the quotes an unset variable would render
+#     as a bare empty value, which YAML reads as null rather than an empty string, and
+#     Alertmanager rejects null where it expects a string.
+#
+# -----------------------------------------------------------------------------
+# SAFE DEFAULTS
+# -----------------------------------------------------------------------------
+# The defaults wired in docker-compose.yml point at RFC 2606 reserved names (example.invalid)
+# and the IANA discard port, which cannot route anywhere. So an unconfigured deployment starts
+# cleanly and fails closed rather than paging a stranger, instead of crashing on a missing
+# variable or delivering alerts to whoever happens to own the address someone fat-fingered.
+#
+# render-config.sh prints a WARNING to stderr whenever it sees one of these reserved
+# destinations still in place, so `docker compose logs alertmanager` tells you immediately that
+# alerting evaluates correctly and delivers nothing.
+#
+# Alertmanager is intentionally not published to a host port in docker-compose.yml, since its API
+# is unauthenticated. Reach it with:
+#
+#     docker compose exec alertmanager wget -q -O- http://127.0.0.1:9093/#/alerts
+#
+# -----------------------------------------------------------------------------
+# What this is expected to send
+# -----------------------------------------------------------------------------
+#   severity=critical -> webhook (page) + email (page)     e.g. AllProvidersExhausted
+#   severity=warning  -> email digest only, no page        e.g. PrimaryLLMDown
+#   severity=info     -> email digest only, no page        e.g. ConversationMemoryPressure
+#
+# The split matters for a bot. A dead provider is worth waking someone for because students
+# are messaging and getting nothing. A slow p90 is not, because it is a trend and the system is
+# still answering. Paging on both is how an on-call rotation learns to ignore the pager.
+#
+# Repeat intervals are deliberately asymmetric. Critical repeats hourly because the condition is
+# still costing students every minute it persists. Warning repeats every twelve hours because it
+# is informational and a daily digest is enough.
+
+global:
+  # How long Alertmanager waits for the notification pipeline to settle, and how long it
+  # tolerates a group having no data before deciding the state is unknown. 5m matches the
+  # longest `for:` in the rule file plus room for a scrape interval.
+  resolve_timeout: 5m
+
+  # An SMTP relay you control. Keep this on an internal relay with its own authentication rather
+  # than a consumer mailbox. Defaults to a host that cannot resolve.
+  smtp_smarthost: "${SMTP_SMARTHOST}"
+  smtp_from: "${SMTP_FROM}"
+  # Many internal relays accept unauthenticated mail from a trusted network, in which case these
+  # stay empty and the rendered file contains a quoted empty string. Prefer such a relay over
+  # putting a password in a variable that may end up in a .env file someone pastes somewhere.
+  # Anything set here is passed through verbatim, so a password containing $ or backticks is safe:
+  # neither renderer evaluates the value it inserts.
+  smtp_auth_username: "${SMTP_AUTH_USERNAME}"
+  smtp_auth_password: "${SMTP_AUTH_PASSWORD}"
+  smtp_require_tls: true
+
+  # Do not resolve the host in the target URL; notification targets are reached through Docker's
+  # internal network, where the literal names in this file are what resolve.
+  smtp_hello: "${SMTP_HELLO}"
+
+route:
+  # Anything not matched below lands here. This receiver exists so that an alert with a typo in
+  # its severity label is still visibly delivered somewhere rather than being silently dropped.
+  receiver: default-email
+  group_by: ["alertname", "severity"]
+  # 30s lets a burst of related alerts arrive as one notification instead of a flurry.
+  group_wait: 30s
+  # Once a group has fired, wait this long before sending updates about further changes.
+  group_interval: 5m
+  # How long before repeating an unchanged firing alert. Inherited by every child route.
+  repeat_interval: 12h
+  routes:
+    # Critical first, because routing is first-match-wins and `severity=critical` is more
+    # specific than the catch-all below.
+    - matchers:
+        - severity="critical"
+      receiver: critical-webhook
+      group_by: ["alertname", "cause", "provider"]
+      group_wait: 10s
+      # A total outage justifies a much shorter repeat than a warning: one hour is already too
+      # long when every student message is failing.
+      repeat_interval: 1h
+      continue: false
+
+    - matchers:
+        - severity="warning"
+      receiver: default-email
+      # Group by provider as well so one provider's symptoms do not hide another's.
+      group_by: ["alertname", "provider"]
+      repeat_interval: 12h
+
+    - matchers:
+        - severity="info"
+      receiver: default-email
+      repeat_interval: 24h
+
+receivers:
+  # Slack incoming webhook, PagerDuty events endpoint, Opsgenie, or anything else accepting a
+  # JSON POST. Defaults to the IANA discard port, which cannot deliver.
+  - name: critical-webhook
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        # Alertmanager posts its own JSON envelope; a generic receiver that expects a bare
+        # message body will show raw JSON, which is ugly but not wrong.
+        send_resolved: true
+        max_alerts: 0
+
+  - name: default-email
+    email_configs:
+      # The on-call address. Defaults to a domain reserved by RFC 2606 that can never be
+      # delivered to.
+      - to: "${SMTP_TO}"
+        send_resolved: true
+        headers:
+          subject: >-
+            [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}]
+            limbot {{ .GroupLabels.alertname }}
+          # Plain text is deliberate. HTML email from an alert tool tends to render badly in some
+          # clients and is harder to read in a terminal, which is where an on-call responder will
+          # usually be when a page arrives.
+        html: ""
+
+inhibit_rules:
+  # If the target is not being scraped, every other rule is being fed no data and evaluating to
+  # "no problem". Without this, a container that dies produces TargetDown and then nothing else,
+  # which reads as the incident resolving itself rather than getting quieter. Inhibiting the rest
+  # makes it unambiguous that only the root cause is being reported.
+  - source_matchers:
+      - alertname="TargetDown"
+    target_matchers:
+      - severity=~"warning|critical"
+    equal: []
+
+  # A total outage makes the per-tier alerts redundant and noisier. Report the root cause once.
+  - source_matchers:
+      - alertname="AllProvidersExhausted"
+    target_matchers:
+      - alertname=~"PrimaryLLMDown|ProviderRateLimited|CircuitBreakerOpen|NoAnswersProduced"
+    equal: []
+
+  # A slow webhook acknowledgement is what makes Meta redeliver, so the duplicate storm is a
+  # consequence rather than an independent problem. Report the cause, not the symptom.
+  - source_matchers:
+      - alertname="WebhookAckSlow"
+    target_matchers:
+      - alertname="DuplicateWebhookStorm"
+    equal: []
+
+  # Latency is the expected consequence of a degraded tier; report the degradation instead.
+  - source_matchers:
+      - alertname=~"PrimaryLLMDown|CircuitBreakerOpen"
+    target_matchers:
+      - alertname="HighLatency"
+    equal: []
+
+# Scheduled silences are deliberately not configured here: Alertmanager's config file has no
+# field for them, and they are managed through the HTTP API or the web UI. Use a time-limited
+# silence for a planned maintenance window rather than commenting a rule out. A silence expires on
+# its own; a commented-out rule stays muted forever.

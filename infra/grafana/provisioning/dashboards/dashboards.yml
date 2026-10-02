@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: limbot
+    orgId: 1
+    folder: Limbot
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

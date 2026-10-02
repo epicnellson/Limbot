@@ -1,0 +1,248 @@
+name: limbot
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-count: "5"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: limbot/app:0.2.0
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      QDRANT_URL: http://qdrant:6333
+      POSTGRES_DSN: postgresql://limbot:${POSTGRES_PASSWORD:-limbot}@postgres:5432/limbot
+      TIER3_BASE_URL: ${TIER3_BASE_URL:-http://ollama:11434/v1}
+      DEBUG_ENDPOINTS: ${DEBUG_ENDPOINTS:-false}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - limbot
+      - observability
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.1
+    restart: unless-stopped
+    environment:
+      QDRANT__LOG_LEVEL: ${QDRANT_LOG_LEVEL:-INFO}
+      QDRANT__SERVICE__ENABLE_CORS: "false"
+      # To lock Qdrant down, set QDRANT__SERVICE__API_KEY here and QDRANT_API_KEY in .env.
+      # Leaving both empty keeps the instance open, which is only safe while it is bound to
+      # 127.0.0.1 and not published beyond the app container.
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:6333:6333"
+      - "${BIND_ADDRESS:-127.0.0.1}:6334:6334"
+    networks:
+      - limbot
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging: *logging
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: limbot
+      POSTGRES_USER: limbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-limbot}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # The read-only student queries live in the schema; seeding runs once on first boot.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:5432:5432"
+    networks:
+      - limbot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U limbot -d limbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *logging
+
+  ollama:
+    image: ollama/ollama:0.9.6
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 24h
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - limbot
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/11434' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging: *logging
+    # Off by default: only start it when you actually want the local LLM tier.
+    profiles: ["ollama"]
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alert rules. Mounted as a directory at an absolute path because rule_files in
+      # prometheus.yml refers to /etc/prometheus/rules/*.yml; Prometheus resolves relative
+      # paths against its working directory, not against the config file.
+      - ./monitoring/prometheus:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:9090:9090"
+    networks:
+      - observability
+    depends_on:
+      - web
+      - alertmanager
+    logging: *logging
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    restart: unless-stopped
+# Alertmanager has no environment variable expansion, so the config is rendered from a
+    # template by render-config.sh, which then execs Alertmanager as PID 1. That keeps the
+    # notification destinations out of version control, which is the only way a webhook URL or
+    # SMTP password can stop being committed.
+    #
+    # Alertmanager's own flags are not listed here: render-config.sh supplies them from environment
+    # variables, which keeps one source of truth for their defaults. Arguments may still be
+    # appended and are passed straight through.
+    command:
+      - /etc/alertmanager/render-config.sh
+    # Where render-config.sh reads the template from and writes the result to. The write target
+    # must be a writable path: /etc/alertmanager is a read-only mount of the repo, so rendering
+    # there would fail with a permission error on every start.
+    environment:
+      ALERTMANAGER_TEMPLATE: /etc/alertmanager/alertmanager.yml.template
+      ALERTMANAGER_CONFIG: /tmp/alertmanager.yml
+      # "auto" uses envsubst when present and falls back to awk. The Prometheus images are
+      # busybox-based and busybox does not ship envsubst, so in practice this is awk there. Pin it
+      # to "envsubst" or "awk" to force one and confirm they agree.
+      ALERTMANAGER_RENDERER: ${ALERTMANAGER_RENDERER:-auto}
+      # Alertmanager's own settings. render-config.sh applies the same defaults, so these are
+      # declared only to document them alongside the destinations below.
+      ALERTMANAGER_STORAGE_PATH: /alertmanager
+      ALERTMANAGER_RETENTION: ${ALERTMANAGER_RETENTION:-120h}
+      ALERTMANAGER_LISTEN_ADDRESS: 0.0.0.0:9093
+      # Notification destinations. Defaults below are reserved placeholders that cannot deliver
+      # anywhere, so a missing value produces a working Alertmanager that fails closed rather than
+      # one that errors at startup or, worse, pages something unintended. See .env.example.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-http://127.0.0.1:9/replace-me}
+      SMTP_SMARTHOST: ${SMTP_SMARTHOST:-}
+      SMTP_FROM: ${SMTP_FROM:-limbot-alerts@example.invalid}
+      SMTP_TO: ${SMTP_TO:-limbot-alerts@example.invalid}
+      SMTP_HELLO: ${SMTP_HELLO:-limbot-alertmanager}
+      SMTP_AUTH_USERNAME: ${SMTP_AUTH_USERNAME:-}
+      SMTP_AUTH_PASSWORD: ${SMTP_AUTH_PASSWORD:-}
+    volumes:
+      - ./monitoring/alertmanager:/etc/alertmanager:ro
+      - alertmanager_data:/alertmanager
+    # Deliberately not published to a host port. Prometheus is the only client that needs to
+    # reach Alertmanager, and it reaches it over the internal observability network. Publishing
+    # it would put an unauthenticated notification and silence API on the host.
+    # To inspect the UI: docker compose exec alertmanager wget -q -O- http://127.0.0.1:9093/
+    expose:
+      - "9093"
+    networks:
+      - observability
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9093/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-limbot}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3000
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:3000:3000"
+    networks:
+      - observability
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *logging
+
+networks:
+  limbot:
+    driver: bridge
+  observability:
+    driver: bridge
+
+volumes:
+  qdrant_storage:
+  postgres_data:
+  ollama_models:
+  prometheus_data:
+  alertmanager_data:
+  grafana_data:
