@@ -132,7 +132,10 @@ class WhatsAppCloudClient:
         if response.is_success:
             return data
 
-        error = data.get("error") if isinstance(data.get("error"), dict) else {}
+        error_payload = data.get("error")
+        # Narrowed once, in a binding of its own. Calling data.get("error") again inside the
+        # condition left mypy seeing the union of both calls rather than the narrowed value.
+        error: dict[str, Any] = error_payload if isinstance(error_payload, dict) else {}
         message = str(error.get("message") or response.text or "unknown Graph API error")
         self._log_failure(operation, response, error, message)
         metrics.WHATSAPP_MESSAGES.labels(direction="outbound", result="rejected").inc()

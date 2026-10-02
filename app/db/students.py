@@ -11,9 +11,12 @@ from app.db.pool import Database
 logger = logging.getLogger(__name__)
 
 DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-DAY_LOOKUP = {name: index for index, name in enumerate(DAYS, start=1)}
+DAY_LOOKUP: dict[str, int] = {name: index for index, name in enumerate(DAYS, start=1)}
 DAY_LOOKUP.update({name[:3]: index for index, name in enumerate(DAYS, start=1)})
-DAY_LOOKUP.update({index: index for index in range(1, 8)})
+# Keys are str only: day_number() validates int input against its own range before consulting this
+# table, so a previous set of int keys here was unreachable. Widening the annotation to accept int
+# keys would have silenced mypy while keeping dead entries; converting the keys to str would have
+# quietly started accepting "3" as a weekday, which is a behaviour change, not a type fix.
 
 
 class StudentNotLinked(Exception):

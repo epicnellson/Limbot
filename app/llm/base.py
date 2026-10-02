@@ -68,11 +68,19 @@ class ProviderResponseError(ProviderError):
 class LLMProvider(abc.ABC):
     """One LLM endpoint. Implementations translate to and from the shared request types."""
 
-    name: ClassVar[str] = "provider"
-    tier: ClassVar[int] = 0
+    # Instance attributes, not ClassVar. They vary per provider instance: OpenAICompatibleProvider
+    # is built once per endpoint, so Groq is tier 1 and every local runtime is tier 3 from the
+    # same class (app/llm/openai_compat.py). Declaring these ClassVar while a subclass assigned them
+    # per instance is what mypy rejected. Setting them here rather than leaving each subclass to
+    # either a class-level default or an instance assignment also means there is one definition of
+    # where an identity comes from, which is what the pipeline's tier ordering reads.
+    name: str
+    tier: int
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, name: str, tier: int) -> None:
         self.model = model
+        self.name = name
+        self.tier = tier
 
     @property
     def configured(self) -> bool:

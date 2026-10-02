@@ -30,9 +30,7 @@ class StubProvider(LLMProvider):
         failures: list[Exception] | None = None,
         configured: bool = True,
     ) -> None:
-        super().__init__(f"{name}-model")
-        self.name = name
-        self.tier = tier
+        super().__init__(f"{name}-model", name=name, tier=tier)
         self.failures = list(failures or [])
         self._configured = configured
         self.calls = 0

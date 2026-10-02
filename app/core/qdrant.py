@@ -56,7 +56,7 @@ class VectorStore:
         self._client = AsyncQdrantClient(
             url=self._settings.qdrant_url,
             api_key=self._settings.qdrant_api_key_value,
-            timeout=self._settings.qdrant_timeout_seconds,
+            timeout=int(self._settings.qdrant_timeout_seconds),
         )
         logger.info(
             "qdrant client created",

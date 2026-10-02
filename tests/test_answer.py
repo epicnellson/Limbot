@@ -48,9 +48,7 @@ class ScriptedProvider(LLMProvider):
         tier: int = 1,
         error: ProviderError | None = None,
     ) -> None:
-        super().__init__(f"{name}-model")
-        self.name = name
-        self.tier = tier
+        super().__init__(f"{name}-model", name=name, tier=tier)
         self._script = list(script)
         self._error = error
         self.requests: list[LLMRequest] = []

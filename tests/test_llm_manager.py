@@ -39,9 +39,7 @@ class ScriptedProvider(LLMProvider):
         tool_calls: tuple[ToolCall, ...] = (),
         configured: bool = True,
     ) -> None:
-        super().__init__(f"{name}-model")
-        self.name = name
-        self.tier = tier
+        super().__init__(f"{name}-model", name=name, tier=tier)
         self._error = error
         self._stall = stall
         self._text = text

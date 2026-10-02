@@ -42,11 +42,8 @@ class RecordingWhatsApp(WhatsAppCloudClient):
 
 
 class FixedProvider(LLMProvider):
-    name = "fixed"
-    tier = 1
-
     def __init__(self, text: str = "Linear algebra is at 10:00 in B204.") -> None:
-        super().__init__("fixed-model")
+        super().__init__("fixed-model", name="fixed", tier=1)
         self._text = text
         self.calls = 0
 

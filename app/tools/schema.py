@@ -13,7 +13,6 @@ JSON_TYPES: dict[str, type | tuple[type, ...]] = {
     "null": type(None),
 }
 
-UNKNOWN_TYPE = object()
 
 
 class SchemaError(ValueError):
@@ -64,8 +63,10 @@ def _check(path: str, declared: Any, value: Any) -> list[Problem]:
         return []
     expected = declared.get("type")
     if isinstance(expected, str):
-        python_type = JSON_TYPES.get(expected, UNKNOWN_TYPE)
-        if python_type is not UNKNOWN_TYPE and not _matches(python_type, value):
+        python_type = JSON_TYPES.get(expected)
+        if python_type is None:
+            return []
+        if not _matches(python_type, value):
             return [Problem(path, f"must be of type {expected}")]
 
     problems: list[Problem] = []

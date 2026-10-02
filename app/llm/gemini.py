@@ -45,9 +45,6 @@ def _upper_types(schema: Any) -> Any:
 class GeminiProvider(LLMProvider):
     """Google Gemini tier, used for the long context fallback."""
 
-    name = "gemini"
-    tier = 2
-
     def __init__(
         self,
         *,
@@ -56,7 +53,7 @@ class GeminiProvider(LLMProvider):
         api_key: str | None,
         timeout_seconds: float = 45.0,
     ) -> None:
-        super().__init__(model)
+        super().__init__(model, name="gemini", tier=2)
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds

@@ -112,7 +112,7 @@ async def _run(settings: Settings, args: argparse.Namespace, http: httpx.AsyncCl
 
     async def answer_case(case: EvalCase) -> Answer:
         if case.prior:
-            conversations.reset(case.context.wa_id)
+            conversations.clear(case.context.wa_id)
             for question, reply in case.prior:
                 conversations.record(case.context.wa_id, question, reply)
         return await answers.answer(case.question, case.context, http=http)

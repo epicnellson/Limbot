@@ -25,9 +25,6 @@ class OpenAICompatibleProvider(LLMProvider):
     bespoke adapter.
     """
 
-    name = "openai-compatible"
-    tier = 3
-
     def __init__(
         self,
         *,
@@ -39,10 +36,8 @@ class OpenAICompatibleProvider(LLMProvider):
         timeout_seconds: float = 45.0,
         owns_retry: bool = True,
     ) -> None:
-        super().__init__(model)
+        super().__init__(model, name=name, tier=tier)
         self.base_url = base_url.rstrip("/")
-        self.name = name
-        self.tier = tier
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
         self.owns_retry = owns_retry
