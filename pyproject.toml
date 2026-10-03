@@ -66,5 +66,5 @@ warn_unused_configs = true
 disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
-module = ["qdrant_client.*"]
+module = ["qdrant_client.*", "httpx.*", "httpcore.*", "h2.*", "anyio.*", "asyncpg.*", "uvicorn.*"]
 ignore_missing_imports = true
