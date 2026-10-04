@@ -104,8 +104,10 @@ class OpenAICompatibleProvider(LLMProvider):
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ProviderResponseError(f"{self.name} returned no choices", provider=self.name)
-        choice = choices[0] if isinstance(choices[0], dict) else {}
-        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        choice_raw = choices[0]
+        choice: dict[str, Any] = choice_raw if isinstance(choice_raw, dict) else {}
+        message_raw = choice.get("message")
+        message: dict[str, Any] = message_raw if isinstance(message_raw, dict) else {}
         content = message.get("content")
         text = content if isinstance(content, str) and content.strip() else None
 
@@ -115,7 +117,8 @@ class OpenAICompatibleProvider(LLMProvider):
             for index, raw in enumerate(raw_calls):
                 if not isinstance(raw, dict):
                     continue
-                function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+                function_raw = raw.get("function")
+                function: dict[str, Any] = function_raw if isinstance(function_raw, dict) else {}
                 name = function.get("name")
                 if not isinstance(name, str) or not name:
                     continue

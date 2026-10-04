@@ -115,15 +115,17 @@ class EvalReport:
         degraded in a way the pass rate alone hides.
         """
         counts: Counter[str] = Counter()
-        # Counter's value type defaults to int, so the annotation has to be float. mypy does not
-        # widen it from how the counter is later used, and int(...) here would have silently
-        # truncated every provider's latency to whole milliseconds.
-        totals: Counter[float] = Counter()
+        # A Counter counts, so its value type would be int and it is the wrong container for a sum.
+        # A plain dict keeps latency as float: mypy does not widen an int-valued Counter from how it
+        # is later used, and int(...) here would have silently truncated every provider's latency to
+        # whole milliseconds.
+        totals: dict[str, float] = {}
         for result in self.results:
             if result.skipped:
                 continue
-            counts[result.answer.provider] += 1
-            totals[result.answer.provider] += result.latency_ms
+            provider = result.answer.provider
+            counts[provider] += 1
+            totals[provider] = totals.get(provider, 0.0) + result.latency_ms
         executed = sum(counts.values())
         return tuple(
             ProviderStat(

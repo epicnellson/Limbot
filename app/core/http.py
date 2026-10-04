@@ -99,7 +99,9 @@ def build_http_client(settings: Settings, *, client_name: str = "default") -> ht
 
 
 def _backoff_delay(policy: RetryPolicy, attempt: int) -> float:
-    ceiling = min(policy.max_delay, policy.base_delay * (2 ** (attempt - 1)))
+    # A float base keeps the power in float arithmetic: typeshed types `int ** int` as Any, and that
+    # Any would spread through the multiplication and the min() into this return value.
+    ceiling = min(policy.max_delay, policy.base_delay * 2.0 ** (attempt - 1))
     return ceiling * random.uniform(0.5, 1.0)
 
 

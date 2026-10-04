@@ -183,13 +183,16 @@ class GeminiProvider(LLMProvider):
         candidates = payload.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             raise ProviderResponseError("gemini returned no candidates", provider=self.name)
-        candidate = candidates[0] if isinstance(candidates[0], dict) else {}
-        content = candidate.get("content") if isinstance(candidate.get("content"), dict) else {}
-        parts = content.get("parts") if isinstance(content.get("parts"), list) else []
+        candidate_raw = candidates[0]
+        candidate: dict[str, Any] = candidate_raw if isinstance(candidate_raw, dict) else {}
+        content_raw = candidate.get("content")
+        content: dict[str, Any] = content_raw if isinstance(content_raw, dict) else {}
+        parts_raw = content.get("parts")
+        parts: list[Any] = parts_raw if isinstance(parts_raw, list) else []
 
         texts: list[str] = []
         calls: list[ToolCall] = []
-        for part in parts if isinstance(parts, list) else []:
+        for part in parts:
             if not isinstance(part, dict):
                 continue
             if isinstance(part.get("text"), str) and part["text"].strip():

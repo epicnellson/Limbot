@@ -35,9 +35,10 @@ def _iso(value: Any) -> str | None:
     assumed to already be UTC, which is what Postgres returns for ``timestamptz`` in practice.
     """
     if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(UTC).replace(tzinfo=None)
-        return value.isoformat(timespec="minutes") + "Z"
+        moment: datetime = (
+            value.astimezone(UTC).replace(tzinfo=None) if value.tzinfo is not None else value
+        )
+        return moment.isoformat(timespec="minutes") + "Z"
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, time):
