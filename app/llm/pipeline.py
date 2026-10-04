@@ -142,6 +142,11 @@ class LLMPipeline:
             call = provider.complete(request, http=http)
             if request.timeout_seconds:
                 call = asyncio.wait_for(call, timeout=request.timeout_seconds)
+            # Annotate the base type up front. mypy infers a variable's type from its first
+            # assignment, so without this the ProviderTimeoutError below would pin the inferred
+            # type and the ProviderError from the provider's own `except` would be rejected as an
+            # incompatible assignment. Every attribute read after this block lives on ProviderError.
+            provider_error: ProviderError
             try:
                 response = await call
             except TimeoutError:
