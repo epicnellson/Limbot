@@ -14,7 +14,6 @@ JSON_TYPES: dict[str, type | tuple[type, ...]] = {
 }
 
 
-
 class SchemaError(ValueError):
     """Arguments did not match the declared schema."""
 

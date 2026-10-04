@@ -13,7 +13,6 @@ from app.llm.pipeline import LLMPipeline
 from app.services.answer import AnswerService
 from app.services.dedupe import MessageDeduplicator
 
-
 # Every dependency below reads off app.state, whose attribute type is Any, so each function would
 # otherwise return Any from a declared return type. cast states the intent that main.py already
 # guarantees by populating state during startup. It is preferred over a type: ignore because the
