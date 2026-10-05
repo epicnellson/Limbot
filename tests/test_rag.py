@@ -111,7 +111,9 @@ async def test_upsert_and_search_round_trip(store_settings: Settings) -> None:
         assert written == 2
         assert await store.count() == 2
 
-        hits = await store.search(unit("a"), limit=5, score_threshold=0.0)
+        # No threshold: unit() vectors are mutually orthogonal, so the second chunk's score is
+        # exactly 0.0, and a real Qdrant drops a 0.0-scored point even at score_threshold 0.0.
+        hits = await store.search(unit("a"), limit=5, score_threshold=None)
 
     assert [hit.text for hit in hits] == [
         "eigenvalues come first",
@@ -128,7 +130,9 @@ async def test_search_drops_everything_below_the_threshold(store_settings: Setti
         await store.upsert_chunks([{"text": "a", "title": "", "source": ""}], [unit("a")])
 
         assert await store.search(unit("b"), limit=5, score_threshold=0.5) == []
-        assert len(await store.search(unit("b"), limit=5, score_threshold=0.0)) == 1
+        # Compared against the chunk's own vector, so the score is 1.0 rather than the 0.0 that
+        # an orthogonal pair produces, and the threshold test does not depend on that edge.
+        assert len(await store.search(unit("a"), limit=5, score_threshold=0.5)) == 1
 
 
 async def test_search_honours_the_limit(store_settings: Settings) -> None:
@@ -138,7 +142,7 @@ async def test_search_honours_the_limit(store_settings: Settings) -> None:
             [{"text": "one"}, {"text": "two"}, {"text": "three"}],
             [unit("a"), unit("b"), unit("c")],
         )
-        hits = await store.search(unit("a"), limit=2, score_threshold=0.0)
+        hits = await store.search(unit("a"), limit=2, score_threshold=None)
 
     assert len(hits) == 2
 
