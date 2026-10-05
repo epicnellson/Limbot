@@ -83,8 +83,14 @@ jobs:
           # template or an unwritable output directory all exit non-zero and must fail the job,
           # and the amtool check below catches a missing output file regardless.
           WORK="$(mktemp -d)"
+          # mktemp -d is mode 700 and owned by the runner, while the alertmanager image runs as
+          # nobody, so the container could not even traverse /out. Matching the container to the
+          # user that owns the directory fixes both the render and the amtool read below; chmod
+          # 777 would work but would leave the output world-writable.
+          RUN_UID="$(id -u):$(id -g)"
           render() {
             docker run --rm \
+              --user "$RUN_UID" \
               -v "$PWD/monitoring/alertmanager:/etc/alertmanager:ro" \
               -v "$WORK:/out" \
               -e ALERTMANAGER_TEMPLATE=/etc/alertmanager/alertmanager.yml.template \
@@ -96,6 +102,7 @@ jobs:
           }
           validate() {
             docker run --rm \
+              --user "$RUN_UID" \
               --entrypoint amtool \
               -v "$WORK:/out:ro" \
               prom/alertmanager:v0.28.1 check-config "/out/$1.yml"
