@@ -45,12 +45,31 @@ def unit(text: str, dimensions: int = 4) -> list[float]:
 
 @asynccontextmanager
 async def connected_store(settings: Settings) -> AsyncIterator[VectorStore]:
+    """Connect to a real Qdrant on a collection this test owns outright.
+
+    Qdrant outlives a single test and several tests deliberately share one collection name, so the
+    collection is dropped on the way in and on the way out. Without that, a test that counts points
+    or searches for hits also sees whatever the previous test upserted.
+    """
     store = VectorStore(settings)
     await store.connect()
+    # Captured before the test body runs: a test that simulates a broken store swaps the client out
+    # from under the store, and cleanup still has to reach the real server through the original.
+    client = store.client
+    name = store.collection
+
+    async def drop_collection() -> None:
+        if await client.collection_exists(name):
+            await client.delete_collection(name)
+
+    await drop_collection()
     try:
         yield store
     finally:
-        await store.close()
+        try:
+            await drop_collection()
+        finally:
+            await store.close()
 
 
 @pytest.fixture
