@@ -5,6 +5,11 @@ ARG UV_VERSION=0.12.19
 
 FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
 
+# Declared again without a value so this stage can read the global default above: an ARG declared
+# before the first FROM is visible only to FROM instructions, and left undeclared here ${UV_VERSION}
+# expands to an empty string and pip is handed "uv==".
+ARG UV_VERSION
+
 ENV UV_PYTHON_DOWNLOADS=never \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
