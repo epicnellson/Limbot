@@ -146,7 +146,7 @@ jobs:
             -v "$PWD/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
             -v "$PWD/monitoring/prometheus:/etc/prometheus/rules:ro" \
             prom/prometheus:v3.13.3 \
-            check config --config.file=/etc/prometheus/prometheus.yml
+            check config /etc/prometheus/prometheus.yml
 
   filter:
     name: "Detect whether the evaluation suite must run"
