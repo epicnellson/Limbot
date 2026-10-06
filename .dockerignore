@@ -21,4 +21,6 @@ docker-compose.*.yml
 prometheus.yml
 Dockerfile
 .dockerignore
-README.md
+# Not shipped in the image on purpose: it is metadata only. It must NOT be excluded above --
+# pyproject.toml declares readme = "README.md", so the builder cannot generate package metadata
+# without it and `uv sync` fails before anything is installed.
