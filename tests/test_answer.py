@@ -147,6 +147,28 @@ async def test_a_plain_answer_comes_back_without_any_tool_being_available() -> N
     assert provider.requests[0].tools == ()
 
 
+async def test_without_tools_the_prompt_says_not_to_emit_a_tool_call() -> None:
+    service, provider = make_service([says("No timetable is available.")])
+
+    async with mock_client() as http:
+        await service.answer("what is on today?", STUDENT, http=http)
+
+    system = provider.requests[0].messages[0].content
+    assert "No database tools are available" in system
+    assert "do not emit a tool call" in system
+
+
+async def test_with_tools_the_prompt_does_not_forbid_tool_calls() -> None:
+    tools = registry((TIMETABLE, rows))
+    service, provider = make_service([calls("get_timetable"), says("here it is")], tools=tools)
+
+    async with mock_client() as http:
+        await service.answer("what is on today?", STUDENT, http=http)
+
+    system = provider.requests[0].messages[0].content
+    assert "No database tools are available" not in system
+
+
 async def test_the_prompt_carries_the_system_rules_and_the_student_name() -> None:
     service, provider = make_service([says("ok")])
 

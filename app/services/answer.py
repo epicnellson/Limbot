@@ -214,7 +214,16 @@ class AnswerService:
         first message read differently from every follow up.
         """
         preamble = CONTEXT_PREAMBLE if retrieved else CONTEXT_ABSENT
-        parts = [self._settings.ai_system_prompt, preamble]
+        parts = [self._settings.ai_system_prompt]
+        if self._tools is None or not self._tools.enabled:
+            # With no database available the system prompt's tool rules would push the model
+            # into emitting a tool call the pipeline cannot answer, and the provider rejects
+            # the whole completion. Say so up front so it answers from knowledge instead.
+            parts.append(
+                "No database tools are available on this deployment. Answer from what you "
+                "know, and do not emit a tool call of any kind."
+            )
+        parts.append(preamble)
         if retrieved:
             parts.append(retrieved)
         if context.display_name:
