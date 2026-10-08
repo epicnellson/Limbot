@@ -50,7 +50,6 @@ CREATE TABLE IF NOT EXISTS assignments (
 CREATE INDEX IF NOT EXISTS assignments_due_idx ON assignments (due_at);
 
 CREATE TABLE IF NOT EXISTS submissions (
-    id            BIGSERIAL PRIMARY KEY,
     assignment_id BIGINT      NOT NULL REFERENCES assignments (id) ON DELETE CASCADE,
     student_id    BIGINT      NOT NULL REFERENCES students (id)   ON DELETE CASCADE,
     status        TEXT        NOT NULL CHECK (

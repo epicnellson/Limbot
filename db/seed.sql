@@ -48,7 +48,7 @@ SELECT c.id, entry.day_of_week, entry.start_time, entry.end_time, entry.room
 
 -- Due dates are relative to the moment the seed runs, so the demo always shows live deadlines.
 INSERT INTO assignments (course_id, title, due_at, weight_pct)
-SELECT c.id, entry.title, NOW() + entry.offset, entry.weight_pct
+SELECT c.id, entry.title, NOW() + entry.due_offset, entry.weight_pct
   FROM courses c
   JOIN (VALUES
       ('CS2010', 'Linked list implementation',  '3 days'::interval, 15.00),
@@ -57,7 +57,7 @@ SELECT c.id, entry.title, NOW() + entry.offset, entry.weight_pct
       ('MA1010', 'Eigenvalue problem set',      '5 days'::interval, 10.00),
       ('MA1010', 'Matrix transformations',      '12 days'::interval, 10.00),
       ('ST1010', 'Confidence intervals lab',    '7 days'::interval, 10.00)
-  ) AS entry(code, title, offset, weight_pct) ON entry.code = c.code;
+  ) AS entry(code, title, due_offset, weight_pct) ON entry.code = c.code;
 
 INSERT INTO submissions (assignment_id, student_id, status, submitted_at, grade, feedback)
 SELECT a.id, s.id, sub.status,
@@ -82,12 +82,12 @@ SELECT a.id, s.id, 'graded', NOW() - '6 days'::interval, 91.00, 'Excellent write
  WHERE s.wa_id = '15550004444';
 
 INSERT INTO exams (course_id, exam_date, starts_at, room)
-SELECT c.id, CURRENT_DATE + entry.offset, '09:00'::time, entry.room
+SELECT c.id, CURRENT_DATE + entry.exam_day_offset, '09:00'::time, entry.room
   FROM (VALUES
       ('CS2010', 14, 'A-100'),
       ('MA1010', 21, 'B-200'),
       ('ST1010', 28, 'C-002')
-  ) AS entry(code, offset, room)
+  ) AS entry(code, exam_day_offset, room)
   JOIN courses c ON c.code = entry.code;
 
 INSERT INTO exam_registrations (student_id, exam_id, seat)

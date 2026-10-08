@@ -4,7 +4,8 @@
 #   fly launch --no-deploy       # creates the app on your account (reuses this file)
 #   fly secrets set WHATSAPP_APP_SECRET=<value> WHATSAPP_VERIFY_TOKEN=<value> \
 #     WHATSAPP_ACCESS_TOKEN=<value> WHATSAPP_PHONE_NUMBER_ID=<value> \
-#     GROQ_API_KEY=<value> GEMINI_API_KEY=<value>
+#     GROQ_API_KEY=<value> GEMINI_API_KEY=<value> \
+#     POSTGRES_DSN=postgres://...@limbot-db.internal:5432/postgres?sslmode=disable
 #   fly volume create limbot_cache --size 1    # embeddings model cache (once)
 #   fly deploy
 #
