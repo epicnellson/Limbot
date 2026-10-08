@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_PREAMBLE = "Course material for this question follows. Use it only if it answers the "
 CONTEXT_ABSENT = (
-    "No course material was found for this question. If the answer would need lecture notes, "
-    "say that you could not find it rather than guessing."
+    "No course material was found for this question. Answer general academic questions from "
+    "your own knowledge. If the question needs the institution's specific material, say "
+    "plainly that you could not find it rather than inventing details."
 )
 TOOL_ERROR_PREAMBLE = (
     "The database tools did not return a usable answer. Explain the situation plainly."

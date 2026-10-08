@@ -206,6 +206,7 @@ async def test_when_nothing_passes_the_threshold_the_model_is_told_to_say_so() -
 
     system = provider.requests[0].messages[0].content
     assert "could not find" in system
+    assert "your own knowledge" in system
     assert "Course material retrieved" not in system
     assert answer.retrieved == 0
     assert answer.sources == ()

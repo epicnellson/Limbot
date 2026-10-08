@@ -43,6 +43,20 @@ class StudentTools:
         try:
             return await self._repo.require_id(context.wa_id)
         except StudentNotLinked as exc:
+            logger.warning(
+                "whatsapp number is not linked to a student record: %s",
+                context.wa_id,
+                extra={
+                    "context": {
+                        "wa_id": context.wa_id,
+                        "display_name": context.display_name,
+                        "hint": (
+                            "store the number exactly as Meta sends it in wa_id: "
+                            "E.164 digits without '+', e.g. 23279826564"
+                        ),
+                    }
+                },
+            )
             raise ToolFailure(NOT_LINKED) from exc
 
     async def profile(self, context: ToolContext, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -138,8 +152,9 @@ COURSES_TOOL = ToolSpec(
 TIMETABLE_TOOL = ToolSpec(
     name="get_timetable",
     description=(
-        "Read the signed-in student's weekly timetable. Pass day for a single weekday, or omit "
-        "it for the whole week."
+        "Read the signed-in student's weekly timetable (their class schedule). Use it for "
+        "requests such as 'Timetable', 'My timetable', 'Show my schedule' or 'what is on "
+        "today?'. Pass day for a single weekday, or omit it for the whole week."
     ),
     parameters={
         "type": "object",

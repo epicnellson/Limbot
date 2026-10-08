@@ -138,6 +138,13 @@ def test_tools_require_a_database() -> None:
     assert make_settings(**SECRET, **DB).tools_enabled is True
 
 
+def test_default_system_prompt_instructs_timetable_tool_use() -> None:
+    prompt = make_settings(**SECRET).ai_system_prompt
+    assert "Show my schedule" in prompt
+    assert "get_timetable" not in prompt
+    assert "Never guess these from memory" in prompt
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

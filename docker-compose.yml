@@ -91,6 +91,9 @@ services:
       # The read-only student queries live in the schema; seeding runs once on first boot.
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+      # Links the owner's WhatsApp number to the seeded sample student. Runs after the seed and
+      # is idempotent; override the number with the SQL's psql variable if needed.
+      - ./db/link_student.sql:/docker-entrypoint-initdb.d/03-link_student.sql:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:5432:5432"
     networks:

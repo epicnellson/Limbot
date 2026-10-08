@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -359,6 +360,21 @@ async def test_an_unlinked_number_produces_a_helpful_error() -> None:
 
     assert result.ok is False
     assert result.error == NOT_LINKED
+
+
+async def test_an_unlinked_number_logs_the_raw_wa_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The exact string Meta sends must reach the console so the seed can be checked against it."""
+    registry, _repository = student_registry(linked=False)
+
+    with caplog.at_level(logging.WARNING, logger="app.tools.student"):
+        result = await registry.dispatch("get_student_profile", {}, CONTEXT)
+
+    assert result.ok is False
+    assert result.error == NOT_LINKED
+    assert CONTEXT.wa_id in caplog.text
+    assert "not linked" in caplog.text
 
 
 async def test_the_timetable_tool_translates_a_day_name() -> None:
