@@ -9,6 +9,7 @@ answer.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,13 @@ from app.tools.registry import ToolRegistry
 from app.tools.student import build_student_registry
 
 logger = logging.getLogger(__name__)
+
+# A stopped machine behind the network proxy needs a few seconds to wake, so the first
+# connection attempt can be refused or fail to resolve. The bounds keep the whole wait well
+# inside the health check grace period: a boot that loses the race still starts with the tools
+# off rather than late.
+DATABASE_OPEN_ATTEMPTS = 4
+DATABASE_OPEN_RETRY_SECONDS = 3.0
 
 
 @dataclass(slots=True)
@@ -114,32 +122,45 @@ async def build_runtime(settings: Settings, http: httpx.AsyncClient) -> AiRuntim
 
 async def _open_database(settings: Settings) -> Database | None:
     database = Database(settings)
-    try:
-        await database.connect()
-        reachable, latency_ms, error = await database.ping()
-    except Exception as exc:
-        logger.error(
-            "postgres could not be opened, student tools are disabled",
-            extra={"context": {"error": f"{type(exc).__name__}: {exc}"}},
-        )
-        return None
-    if not reachable:
-        logger.error(
-            "postgres is not answering, student tools are disabled",
-            extra={"context": {"error": error, "latency_ms": round(latency_ms, 1)}},
-        )
-        return None
-    logger.info(
-        "postgres ready",
-        extra={
-            "context": {
-                "latency_ms": round(latency_ms, 1),
-                "read_only": True,
-                "pool_size": settings.postgres_pool_max_size,
-            }
-        },
+    last_error: str | None = None
+    for attempt in range(1, DATABASE_OPEN_ATTEMPTS + 1):
+        try:
+            await database.connect()
+            reachable, latency_ms, error = await database.ping()
+        except Exception as exc:
+            reachable, latency_ms, error = False, 0.0, f"{type(exc).__name__}: {exc}"
+        if reachable:
+            logger.info(
+                "postgres ready",
+                extra={
+                    "context": {
+                        "latency_ms": round(latency_ms, 1),
+                        "read_only": True,
+                        "pool_size": settings.postgres_pool_max_size,
+                        "attempts": attempt,
+                    }
+                },
+            )
+            return database
+        last_error = error
+        await database.close()
+        if attempt < DATABASE_OPEN_ATTEMPTS:
+            logger.warning(
+                "postgres is not answering, retrying",
+                extra={
+                    "context": {
+                        "attempt": attempt,
+                        "of": DATABASE_OPEN_ATTEMPTS,
+                        "error": last_error,
+                    }
+                },
+            )
+            await asyncio.sleep(DATABASE_OPEN_RETRY_SECONDS)
+    logger.error(
+        "postgres could not be opened, student tools are disabled",
+        extra={"context": {"error": last_error, "attempts": DATABASE_OPEN_ATTEMPTS}},
     )
-    return database
+    return None
 
 
 async def _probe_vector_store(settings: Settings, embedder: Embedder, store: VectorStore) -> None:
