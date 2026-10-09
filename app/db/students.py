@@ -340,7 +340,7 @@ class StudentRepository:
               JOIN courses c ON c.id = x.course_id
              WHERE er.student_id = $1
                AND x.exam_date >= CURRENT_DATE
-               AND x.exam_date <= CURRENT_DATE + $2
+               AND x.exam_date <= CURRENT_DATE + $2::integer
              ORDER BY x.exam_date, x.starts_at
              LIMIT 25
             """,
