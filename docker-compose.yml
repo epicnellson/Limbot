@@ -4,7 +4,7 @@ x-logging: &logging
   driver: json-file
   options:
     max-size: "10m"
-    max-count: "5"
+    max-file: "5"
 
 services:
   web:
@@ -95,7 +95,7 @@ services:
       # is idempotent; override the number with the SQL's psql variable if needed.
       - ./db/link_student.sql:/docker-entrypoint-initdb.d/03-link_student.sql:ro
     ports:
-      - "${BIND_ADDRESS:-127.0.0.1}:5432:5432"
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     networks:
       - limbot
     healthcheck:
