@@ -84,9 +84,15 @@ class RetrievalPipeline:
     def enabled(self) -> bool:
         return self._settings.vector_store_enabled
 
-    async def retrieve(self, question: str) -> RetrievalResult:
+    async def retrieve(
+        self, question: str, *, audiences: tuple[str, ...] | None = None
+    ) -> RetrievalResult:
         if not self.enabled:
             return RetrievalResult(reason="disabled")
+        # An empty audience set is not "no filter": it means this caller may retrieve nothing.
+        # Returning before the query keeps a blocked sender from even reaching the vector store.
+        if audiences is not None and not audiences:
+            return RetrievalResult(reason="no_access")
         query = question.strip()
         if not query:
             return RetrievalResult(reason="empty_query")
@@ -98,6 +104,7 @@ class RetrievalPipeline:
                 vector,
                 limit=self._settings.rag_top_k,
                 score_threshold=self._settings.rag_score_threshold,
+                audiences=audiences,
             )
         except Exception as exc:
             elapsed = time.perf_counter() - started
@@ -131,6 +138,7 @@ class RetrievalPipeline:
                 "context": {
                     "chunks": len(chunks),
                     "considered": len(hits),
+                    "audiences": list(audiences) if audiences is not None else None,
                     "top_score": round(chunks[0].score, 4) if chunks else None,
                     "duration_ms": round(elapsed * 1000, 1),
                 }

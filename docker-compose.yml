@@ -94,6 +94,8 @@ services:
       # Links the owner's WhatsApp number to the seeded sample student. Runs after the seed and
       # is idempotent; override the number with the SQL's psql variable if needed.
       - ./db/link_student.sql:/docker-entrypoint-initdb.d/03-link_student.sql:ro
+      # Access control rows (roles). Runs last and is idempotent.
+      - ./db/contacts.sql:/docker-entrypoint-initdb.d/04-contacts.sql:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     networks:

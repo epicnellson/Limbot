@@ -9,6 +9,7 @@ from app.config import Settings
 from app.core.qdrant import VectorStore
 from app.core.tasks import TaskManager
 from app.core.whatsapp import WhatsAppCloudClient
+from app.db.contacts import AccessResolver
 from app.llm.pipeline import LLMPipeline
 from app.services.answer import AnswerService
 from app.services.dedupe import MessageDeduplicator
@@ -52,6 +53,10 @@ def get_answer_service(request: Request) -> AnswerService:
     return cast(AnswerService, request.app.state.answers)
 
 
+def get_access_resolver(request: Request) -> AccessResolver | None:
+    return cast(AccessResolver | None, request.app.state.access)
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 HttpClientDep = Annotated[httpx.AsyncClient, Depends(get_http_client)]
 TaskManagerDep = Annotated[TaskManager, Depends(get_task_manager)]
@@ -60,3 +65,4 @@ DedupeDep = Annotated[MessageDeduplicator, Depends(get_dedupe)]
 VectorStoreDep = Annotated[VectorStore, Depends(get_vector_store)]
 LLMPipelineDep = Annotated[LLMPipeline, Depends(get_llm_pipeline)]
 AnswerServiceDep = Annotated[AnswerService, Depends(get_answer_service)]
+AccessResolverDep = Annotated[AccessResolver | None, Depends(get_access_resolver)]

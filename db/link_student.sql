@@ -13,10 +13,10 @@
 -- digits without '+', spaces or leading zeros. This is the test sender's wa_id seen in the
 -- live logs. Override the default with:
 --
---     psql "$POSTGRES_DSN" -v phone=23288436147 -f db/link_student.sql
+--     psql "$POSTGRES_DSN" -v phone=23279826564 -f db/link_student.sql
 --
 -- Idempotent: re-running never duplicates rows.
-\set phone 23274888413
+\set phone 23279826564
 
 -- 1. Repoint the seeded sample student (Ada Lovelace, the richest record: a weekly timetable,
 --    upcoming assignment deadlines and a graded submission) to the target number. Because

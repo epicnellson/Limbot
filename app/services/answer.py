@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app import access
 from app.config import Settings
 from app.conversation.store import ConversationStore
 from app.llm.pipeline import LLMPipeline, NoProviderAvailable
@@ -24,6 +25,14 @@ CONTEXT_ABSENT = (
 )
 TOOL_ERROR_PREAMBLE = (
     "The database tools did not return a usable answer. Explain the situation plainly."
+)
+NO_TOOLS_PREAMBLE = (
+    "No database tools are available to this sender. Answer from what you know, and do not "
+    "emit a tool call of any kind."
+)
+ACCESS_DENIED = (
+    "This number is not set up to use the assistant. If that is unexpected, please contact the "
+    "office so it can be enabled."
 )
 
 
@@ -88,14 +97,27 @@ class AnswerService:
         if not self.enabled:
             return Answer(text="", error="no AI provider is configured")
 
-        retrieval = await self._retrieve(question)
-        messages = self._build_messages(question, context, retrieval.context)
+        # The role decides the audiences before anything is retrieved, so a blocked or public
+        # sender never reaches the vector store with a filter that could leak course material.
+        audiences = access.audiences_for(context.role)
+        if not audiences:
+            logger.info(
+                "refusing a blocked sender",
+                extra={"context": {"wa_id": context.wa_id, "role": context.role}},
+            )
+            return Answer(text=ACCESS_DENIED, provider="none")
+
+        retrieval = await self._retrieve(question, audiences)
+        specs = self._tool_specs(context)
+        messages = self._build_messages(
+            question, context, retrieval.context, tools_available=bool(specs)
+        )
 
         used_tools: list[str] = []
         tool_rounds = 0
         request = LLMRequest(
             messages=messages,
-            tools=self._tool_specs(),
+            tools=specs,
             temperature=self._settings.ai_temperature,
             max_tokens=self._settings.ai_max_tokens,
             timeout_seconds=self._settings.ai_request_timeout_seconds,
@@ -125,7 +147,7 @@ class AnswerService:
             # what the student gets, so a confused model cannot keep the turn open indefinitely.
             budget_spent = tool_rounds >= self._settings.ai_max_tool_rounds
             calls = () if budget_spent else response.tool_calls[:MAX_TOOL_CALLS_PER_RESPONSE]
-            if not calls or not self._tools:
+            if not calls or self._tools is None or not specs:
                 return self._finish(
                     response,
                     question,
@@ -194,18 +216,23 @@ class AnswerService:
             degraded=degraded,
         )
 
-    async def _retrieve(self, question: str) -> RetrievalResult:
+    async def _retrieve(self, question: str, audiences: tuple[str, ...]) -> RetrievalResult:
         if self._retrieval is None:
             return RetrievalResult(reason="disabled")
-        return await self._retrieval.retrieve(question)
+        return await self._retrieval.retrieve(question, audiences=audiences)
 
-    def _tool_specs(self) -> tuple[ToolSpec, ...]:
+    def _tool_specs(self, context: ToolContext) -> tuple[ToolSpec, ...]:
         if self._tools is None or not self._tools.enabled:
             return ()
-        return self._tools.specs()
+        return self._tools.specs(context.role)
 
     def _build_messages(
-        self, question: str, context: ToolContext, retrieved: str
+        self,
+        question: str,
+        context: ToolContext,
+        retrieved: str,
+        *,
+        tools_available: bool,
     ) -> tuple[ChatMessage, ...]:
         """The system prompt, then prior exchanges, then the new question.
 
@@ -215,14 +242,11 @@ class AnswerService:
         """
         preamble = CONTEXT_PREAMBLE if retrieved else CONTEXT_ABSENT
         parts = [self._settings.ai_system_prompt]
-        if self._tools is None or not self._tools.enabled:
-            # With no database available the system prompt's tool rules would push the model
-            # into emitting a tool call the pipeline cannot answer, and the provider rejects
+        if not tools_available:
+            # With no tools exposed for this role the system prompt's tool rules would push the
+            # model into emitting a tool call the request cannot answer, and the provider rejects
             # the whole completion. Say so up front so it answers from knowledge instead.
-            parts.append(
-                "No database tools are available on this deployment. Answer from what you "
-                "know, and do not emit a tool call of any kind."
-            )
+            parts.append(NO_TOOLS_PREAMBLE)
         parts.append(preamble)
         if retrieved:
             parts.append(retrieved)

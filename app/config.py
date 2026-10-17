@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     http_max_keepalive_connections: int = 20
     http_keepalive_expiry_seconds: float = 30.0
     http_connect_retries: int = 2
+    http_local_address: str | None = None
     outbound_max_attempts: int = 4
     outbound_retry_base_delay_seconds: float = 0.5
     outbound_retry_max_delay_seconds: float = 8.0
@@ -74,6 +75,8 @@ class Settings(BaseSettings):
     qdrant_timeout_seconds: float = 5.0
     qdrant_collection: str = "limbot_knowledge"
     qdrant_required: bool = True
+
+    admin_api_token: SecretStr | None = None
 
     ai_enabled: bool = True
     ai_system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -132,6 +135,7 @@ class Settings(BaseSettings):
         "gemini_api_key",
         "tier3_api_key",
         "postgres_dsn",
+        "admin_api_token",
         mode="before",
     )
     @classmethod
@@ -224,6 +228,10 @@ class Settings(BaseSettings):
     @property
     def postgres_dsn_value(self) -> str | None:
         return _secret_value(self.postgres_dsn)
+
+    @property
+    def admin_api_token_value(self) -> str | None:
+        return _secret_value(self.admin_api_token)
 
     @property
     def configured_providers(self) -> tuple[str, ...]:

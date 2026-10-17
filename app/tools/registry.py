@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from app import metrics
+from app import access, metrics
 from app.llm.types import ToolSpec
 from app.tools.context import ToolContext
 from app.tools.schema import require_valid
@@ -30,11 +30,18 @@ class ToolFailure(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
-    """A tool as the model sees it, plus the function that runs it."""
+    """A tool as the model sees it, plus the function that runs it.
+
+    ``min_role`` is the least privileged role allowed to use it. It defaults to ``public`` so a
+    tool that carries no access requirement is genuinely open; the student-record tools raise it
+    to ``student``. Enforced twice: :meth:`ToolRegistry.specs` hides a tool from a role that may
+    not use it, and :meth:`ToolRegistry.dispatch` refuses it anyway.
+    """
 
     spec: ToolSpec
     handler: ToolHandler
     timeout_seconds: float = 10.0
+    min_role: str = access.PUBLIC
 
     @property
     def name(self) -> str:
@@ -94,8 +101,19 @@ class ToolRegistry:
         self._tools[definition.name] = definition
         logger.debug("tool registered", extra={"context": {"tool": definition.name}})
 
-    def specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(definition.spec for definition in self._tools.values())
+    def specs(self, role: str | None = None) -> tuple[ToolSpec, ...]:
+        """The tool specs to advertise. ``role`` filters out tools it is not allowed to use.
+
+        ``None`` returns every spec and is only for callers that have already made an access
+        decision or are inspecting the registry; the answer path always passes a role.
+        """
+        if role is None:
+            return tuple(definition.spec for definition in self._tools.values())
+        return tuple(
+            definition.spec
+            for definition in self._tools.values()
+            if access.role_at_least(role, definition.min_role)
+        )
 
     def describe(self) -> list[str]:
         return list(self._tools)
@@ -114,6 +132,14 @@ class ToolRegistry:
                 ok=False,
                 payload={},
                 error=(f"unknown tool {name!r}; available tools: {', '.join(sorted(self._tools))}"),
+            )
+        if not access.role_at_least(context.role, definition.min_role):
+            metrics.TOOL_CALLS.labels(tool=name, result="forbidden").inc()
+            return ToolResult(
+                name=name,
+                ok=False,
+                payload={},
+                error="this tool is not available to this sender",
             )
 
         started = asyncio.get_running_loop().time()

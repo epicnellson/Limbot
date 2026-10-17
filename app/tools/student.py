@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app import access
 from app.db.students import DAYS, StudentNotLinked, StudentRepository, day_number
 from app.llm.types import ToolSpec
 from app.tools.context import ToolContext
@@ -40,6 +41,10 @@ class StudentTools:
         self._repo = repository
 
     async def _student_id(self, context: ToolContext) -> int:
+        # A role resolved with an explicit student_id (a tester or staff member pointed at a
+        # record) takes precedence over looking the number up in students.wa_id.
+        if context.student_id is not None:
+            return context.student_id
         try:
             return await self._repo.require_id(context.wa_id)
         except StudentNotLinked as exc:
@@ -244,7 +249,12 @@ def build_student_registry(
     ]
     return ToolRegistry(
         [
-            ToolDefinition(spec=spec, handler=handler, timeout_seconds=timeout_seconds)
+            ToolDefinition(
+                spec=spec,
+                handler=handler,
+                timeout_seconds=timeout_seconds,
+                min_role=access.STUDENT,
+            )
             for spec, handler in definitions
         ]
     )

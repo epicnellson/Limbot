@@ -73,7 +73,10 @@ def build_http_client(settings: Settings, *, client_name: str = "default") -> ht
         max_keepalive_connections=settings.http_max_keepalive_connections,
         keepalive_expiry=settings.http_keepalive_expiry_seconds,
     )
-    transport = httpx.AsyncHTTPTransport(retries=settings.http_connect_retries)
+    transport = httpx.AsyncHTTPTransport(
+        retries=settings.http_connect_retries,
+        local_address=settings.http_local_address,
+    )
     client = httpx.AsyncClient(
         transport=transport,
         timeout=timeout,

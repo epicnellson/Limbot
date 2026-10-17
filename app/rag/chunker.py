@@ -143,16 +143,23 @@ def chunk_document(
     *,
     title: str | None = None,
     source: str | None = None,
+    audience: str = "student",
     max_chars: int = 900,
     overlap: int = 150,
 ) -> list[dict[str, object]]:
-    """Chunks plus the metadata that travels with each of them into the vector store."""
+    """Chunks plus the metadata that travels with each of them into the vector store.
+
+    ``audience`` is the visibility tag the retrieval filter matches on: ``public`` for FAQ and
+    announcements, ``student`` for course material. It defaults to ``student`` because that is
+    the safer assumption for material about a course.
+    """
     return [
         {
             "text": chunk.text,
             "ordinal": chunk.ordinal,
             "title": title or "",
             "source": source or "",
+            "audience": audience or "student",
         }
         for chunk in chunk_text(text, max_chars=max_chars, overlap=overlap)
     ]

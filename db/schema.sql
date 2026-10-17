@@ -77,5 +77,27 @@ CREATE TABLE IF NOT EXISTS exam_registrations (
     PRIMARY KEY (student_id, exam_id)
 );
 
+-- Access control. One row per WhatsApp number that gets anything other than the default
+-- public/FAQ treatment. The role is read by the app on every message; it is written only from
+-- an admin psql session, never by the bot, which connects read only.
+--
+--   public   the fallback for any number with no row: FAQ / announcements only
+--   student  enrolled; may use the record tools (also granted implicitly by a students row)
+--   tester   student-level access for someone testing, easy to grant and to revoke
+--   staff    sees everything a student sees, plus staff-audience knowledge
+--   admin    like staff; intended for operators
+--   blocked  refused outright, even when a students row exists
+--
+-- A non-student role (tester, staff, admin) may point at a students row through student_id so
+-- the record tools resolve without needing its own students.wa_id.
+CREATE TABLE IF NOT EXISTS contacts (
+    wa_id      TEXT PRIMARY KEY,
+    role       TEXT NOT NULL DEFAULT 'public'
+               CHECK (role IN ('public', 'student', 'tester', 'staff', 'admin', 'blocked')),
+    student_id BIGINT REFERENCES students (id) ON DELETE SET NULL,
+    note       TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Row level security would be the next step for a multi-tenant deployment. The bot connects
 -- with default_transaction_read_only, so the app layer cannot write even without it.

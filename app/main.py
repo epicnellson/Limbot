@@ -9,7 +9,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 
 from app import __version__, metrics
-from app.api.routes import debug, health, knowledge, observability, webhooks
+from app.api.routes import admin, debug, health, knowledge, observability, webhooks
 from app.config import Settings, get_settings
 from app.core.http import build_http_client
 from app.core.tasks import TaskManager
@@ -47,6 +47,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.answers = runtime.answers
         app.state.vector_store = runtime.vector_store
         app.state.database = runtime.database
+        app.state.access = runtime.access
         app.state.ingestor = runtime.ingestor
 
         metrics.BUILD_INFO.labels(
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(observability.router)
     app.include_router(webhooks.router)
+    app.include_router(admin.router)
     if settings.debug_endpoints:
         logger.warning("debug endpoints mounted under /debug")
         app.include_router(debug.router)

@@ -5,8 +5,10 @@ import logging
 import httpx
 
 from app import metrics
+from app.access import Role, audiences_for
 from app.config import Settings
 from app.core.whatsapp import WhatsAppAPIError, WhatsAppCloudClient, WhatsAppNotConfigured
+from app.db.contacts import AccessDecision, AccessResolver
 from app.llm.base import ProviderError
 from app.models.whatsapp import (
     InboundMessage,
@@ -35,6 +37,7 @@ async def handle_webhook(
     dedupe: MessageDeduplicator,
     answers: AnswerService,
     http: httpx.AsyncClient,
+    access: AccessResolver | None = None,
 ) -> None:
     """Process one webhook delivery. Runs detached from the request that produced it."""
     for change in payload.iter_changes():
@@ -54,6 +57,7 @@ async def handle_webhook(
                 dedupe=dedupe,
                 answers=answers,
                 http=http,
+                access=access,
             )
 
 
@@ -90,6 +94,7 @@ async def _handle_message(
     dedupe: MessageDeduplicator,
     answers: AnswerService,
     http: httpx.AsyncClient,
+    access: AccessResolver | None = None,
 ) -> None:
     metadata = change.value.metadata
     inbound = InboundMessage(
@@ -150,15 +155,41 @@ async def _handle_message(
         await _echo(inbound, whatsapp=whatsapp)
         return
 
+    decision = await _resolve_access(access, inbound.wa_id)
     context = ToolContext(
         wa_id=inbound.wa_id,
         display_name=inbound.profile_name,
         is_new_sender=inbound.profile_name is None,
+        role=decision.role.value,
+        student_id=decision.student_id,
     )
     answer = await _answer(inbound, context, answers=answers, http=http)
     if not answer.text.strip():
         return
     await _reply(inbound, answer, whatsapp=whatsapp)
+
+
+async def _resolve_access(access: AccessResolver | None, wa_id: str) -> AccessDecision:
+    """Resolve the sender's role, failing closed to public on any lookup error.
+
+    A database hiccup must not silently promote a sender, and it must not drop the message
+    either: treating the sender as public gives them the FAQ-only experience, which is the safe
+    default.
+    """
+    if access is None:
+        return AccessDecision(
+            role=Role.PUBLIC, student_id=None, audiences=audiences_for(Role.PUBLIC)
+        )
+    try:
+        return await access.resolve(wa_id)
+    except Exception:
+        logger.exception(
+            "access resolution failed; falling back to public",
+            extra={"context": {"wa_id": wa_id}},
+        )
+        return AccessDecision(
+            role=Role.PUBLIC, student_id=None, audiences=audiences_for(Role.PUBLIC)
+        )
 
 
 async def _answer(

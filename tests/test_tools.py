@@ -18,7 +18,8 @@ from app.tools.registry import (
 from app.tools.schema import SchemaError, require_valid, validate_arguments
 from app.tools.student import NOT_LINKED, build_student_registry
 
-CONTEXT = ToolContext(wa_id="15550001111", display_name="Ada")
+CONTEXT = ToolContext(wa_id="15550001111", display_name="Ada", role="student")
+PUBLIC_CONTEXT = ToolContext(wa_id="15550002222", display_name="Guest")
 
 
 def make_spec(**overrides: Any) -> ToolSpec:
@@ -435,3 +436,20 @@ async def test_out_of_range_windows_are_refused_before_the_query() -> None:
 
     assert result.ok is False
     assert "must be at most 180" in (result.error or "")
+
+
+def test_specs_are_hidden_from_a_public_sender() -> None:
+    registry, _repository = student_registry()
+
+    assert registry.specs("student")
+    assert registry.specs("public") == ()
+    assert registry.specs("blocked") == ()
+
+
+async def test_a_public_sender_cannot_dispatch_a_student_tool() -> None:
+    registry, repository = student_registry()
+    result = await registry.dispatch("get_student_profile", {}, PUBLIC_CONTEXT)
+
+    assert result.ok is False
+    assert "not available" in (result.error or "")
+    assert repository.queries == []

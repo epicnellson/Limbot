@@ -93,7 +93,20 @@ def test_chunk_document_attaches_metadata() -> None:
 
 def test_chunk_document_defaults_metadata_to_empty_strings() -> None:
     payload = chunk_document("A short note.", max_chars=100, overlap=10)
-    assert payload == [{"text": "A short note.", "ordinal": 0, "title": "", "source": ""}]
+    assert payload == [
+        {
+            "text": "A short note.",
+            "ordinal": 0,
+            "title": "",
+            "source": "",
+            "audience": "student",
+        }
+    ]
+
+
+def test_chunk_document_carries_an_explicit_audience() -> None:
+    payload = chunk_document("A short note.", max_chars=100, overlap=10, audience="public")
+    assert payload[0]["audience"] == "public"
 
 
 @pytest.mark.parametrize(

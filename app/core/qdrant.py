@@ -7,6 +7,7 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient, models
 
+from app.access import AUDIENCE_FIELD
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,12 @@ class VectorStore:
             collection_name=name,
             vectors_config=models.VectorParams(size=dimensions, distance=models.Distance.COSINE),
         )
+        # Index the audience tag so the per-role filter stays fast as the collection grows.
+        await self._client.create_payload_index(
+            collection_name=name,
+            field_name=AUDIENCE_FIELD,
+            field_schema=models.PayloadSchemaType.KEYWORD,
+        )
         logger.info(
             "qdrant collection created",
             extra={"context": {"name": name, "dimensions": dimensions}},
@@ -127,15 +134,29 @@ class VectorStore:
         return len(points)
 
     async def search(
-        self, vector: list[float], *, limit: int, score_threshold: float | None = None
+        self,
+        vector: list[float],
+        *,
+        limit: int,
+        score_threshold: float | None = None,
+        audiences: tuple[str, ...] | None = None,
     ) -> list[SearchHit]:
-        """Nearest neighbours above the threshold, best first."""
+        """Nearest neighbours above the threshold, best first.
+
+        ``audiences`` restricts the search to chunks tagged with one of those audiences and is
+        the point at which the audience policy is enforced physically: a filtered field never
+        leaves the database. ``None`` means "no audience filter" and is only for callers that
+        have already made an access decision (the eval harness); an empty tuple matches nothing.
+        """
+        if audiences is not None and not audiences:
+            return []
         if self._client is None:
             await self.connect()
         assert self._client is not None
         response = await self._client.query_points(
             collection_name=self.collection,
             query=vector,
+            query_filter=_audience_filter(audiences),
             limit=max(1, limit),
             score_threshold=score_threshold,
             with_payload=True,
@@ -156,3 +177,17 @@ class VectorStore:
         assert self._client is not None
         result = await self._client.count(collection_name=self.collection, exact=True)
         return int(result.count)
+
+
+def _audience_filter(audiences: tuple[str, ...] | None) -> models.Filter | None:
+    """A Qdrant filter matching only the named audiences, or ``None`` for no restriction."""
+    if not audiences:
+        return None
+    return models.Filter(
+        must=[
+            models.FieldCondition(
+                key=AUDIENCE_FIELD,
+                match=models.MatchAny(any=list(audiences)),
+            )
+        ]
+    )

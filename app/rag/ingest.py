@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app import metrics
+from app.access import AUDIENCES
 from app.config import Settings
 from app.core.embeddings import Embedder, EmbeddingError
 from app.core.qdrant import VectorStore
@@ -30,6 +31,7 @@ class IngestResult:
     chunks: int
     characters: int
     duration_ms: float
+    audience: str = "student"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +41,7 @@ class IngestResult:
             "chunks": self.chunks,
             "characters": self.characters,
             "duration_ms": round(self.duration_ms, 1),
+            "audience": self.audience,
         }
 
 
@@ -63,7 +66,14 @@ class KnowledgeIngestor:
     def enabled(self) -> bool:
         return self._settings.vector_store_enabled
 
-    async def ingest(self, text: str, *, title: str = "", source: str = "") -> IngestResult:
+    async def ingest(
+        self,
+        text: str,
+        *,
+        title: str = "",
+        source: str = "",
+        audience: str = "student",
+    ) -> IngestResult:
         if not self.enabled:
             raise IngestRefused("retrieval is disabled: set RAG_ENABLED and QDRANT_URL")
         body = text.strip()
@@ -73,6 +83,11 @@ class KnowledgeIngestor:
             raise IngestRefused(
                 f"the document is {len(body)} characters, the limit is {MAX_DOCUMENT_CHARS}"
             )
+        normalised_audience = audience.strip().lower()
+        if normalised_audience not in AUDIENCES:
+            raise IngestRefused(
+                f"unknown audience {audience!r}; expected one of {', '.join(AUDIENCES)}"
+            )
 
         started = time.perf_counter()
         document_id = _document_id(body, title)
@@ -80,6 +95,7 @@ class KnowledgeIngestor:
             body,
             title=title or document_id,
             source=source,
+            audience=normalised_audience,
             max_chars=self._settings.knowledge_chunk_chars,
             overlap=self._settings.knowledge_chunk_overlap,
         )
@@ -111,6 +127,7 @@ class KnowledgeIngestor:
                     "document_id": document_id,
                     "title": title,
                     "source": source,
+                    "audience": normalised_audience,
                     "chunks": written,
                     "characters": len(body),
                     "duration_ms": round(elapsed, 1),
@@ -124,6 +141,7 @@ class KnowledgeIngestor:
             chunks=written,
             characters=len(body),
             duration_ms=elapsed,
+            audience=normalised_audience,
         )
 
     def describe(self) -> dict[str, Any]:

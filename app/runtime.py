@@ -20,6 +20,7 @@ from app.config import Settings
 from app.conversation.store import ConversationStore
 from app.core.embeddings import Embedder
 from app.core.qdrant import VectorStore
+from app.db.contacts import AccessResolver, ContactRepository
 from app.db.pool import Database
 from app.db.students import StudentRepository
 from app.llm.pipeline import LLMPipeline
@@ -50,6 +51,7 @@ class AiRuntime:
     answers: AnswerService
     database: Database | None = None
     tools: ToolRegistry | None = None
+    access: AccessResolver | None = None
     retrieval: RetrievalPipeline | None = None
     ingestor: KnowledgeIngestor | None = None
 
@@ -72,6 +74,7 @@ class AiRuntime:
             },
             "retrieval": self.retrieval.describe() if self.retrieval else {"enabled": False},
             "ingest": self.ingestor.describe() if self.ingestor else {"enabled": False},
+            "access": {"enabled": self.access is not None},
             "database": self.database.describe() if self.database else {"enabled": False},
         }
 
@@ -91,14 +94,17 @@ async def build_runtime(settings: Settings, http: httpx.AsyncClient) -> AiRuntim
 
     database: Database | None = None
     tools: ToolRegistry | None = None
+    access: AccessResolver | None = None
     if settings.tools_enabled:
         database = await _open_database(settings)
 
     if database is not None:
+        students = StudentRepository(database)
         tools = build_student_registry(
-            StudentRepository(database),
+            students,
             timeout_seconds=settings.ai_tool_call_timeout_seconds,
         )
+        access = AccessResolver(ContactRepository(database), students)
 
     answers = AnswerService(
         settings,
@@ -115,6 +121,7 @@ async def build_runtime(settings: Settings, http: httpx.AsyncClient) -> AiRuntim
         answers=answers,
         database=database,
         tools=tools,
+        access=access,
         retrieval=retrieval,
         ingestor=ingestor,
     )

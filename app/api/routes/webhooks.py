@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app import metrics
 from app.api.deps import (
+    AccessResolverDep,
     AnswerServiceDep,
     DedupeDep,
     HttpClientDep,
@@ -50,6 +51,7 @@ async def receive_webhook(
     dedupe: DedupeDep,
     answers: AnswerServiceDep,
     http: HttpClientDep,
+    access: AccessResolverDep,
 ) -> Response:
     """Acknowledge the delivery immediately and process it on a background task.
 
@@ -85,7 +87,13 @@ async def receive_webhook(
 
     task = task_manager.submit(
         message_handler.handle_webhook(
-            payload, settings=settings, whatsapp=whatsapp, dedupe=dedupe, answers=answers, http=http
+            payload,
+            settings=settings,
+            whatsapp=whatsapp,
+            dedupe=dedupe,
+            answers=answers,
+            http=http,
+            access=access,
         ),
         name="whatsapp-webhook",
     )

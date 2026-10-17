@@ -34,7 +34,7 @@ DEADLINES = ToolSpec(
     parameters={"type": "object", "properties": {}, "additionalProperties": False},
 )
 
-STUDENT = ToolContext(wa_id="15550001111", display_name="Ada")
+STUDENT = ToolContext(wa_id="15550001111", display_name="Ada", role="student")
 
 
 class ScriptedProvider(LLMProvider):
@@ -68,9 +68,13 @@ class FakeRetrieval:
     def __init__(self, result: RetrievalResult) -> None:
         self._result = result
         self.queries: list[str] = []
+        self.audiences: list[tuple[str, ...] | None] = []
 
-    async def retrieve(self, question: str) -> RetrievalResult:
+    async def retrieve(
+        self, question: str, *, audiences: tuple[str, ...] | None = None
+    ) -> RetrievalResult:
         self.queries.append(question)
+        self.audiences.append(audiences)
         return self._result
 
     def describe(self) -> dict[str, object]:
@@ -217,6 +221,7 @@ async def test_retrieved_material_is_given_to_the_model_with_its_source() -> Non
     assert answer.sources == ("notes.pdf",)
     assert answer.retrieved == 1
     assert retrieval.queries == ["what is bayes?"]
+    assert retrieval.audiences == [("public", "student")]
 
 
 async def test_when_nothing_passes_the_threshold_the_model_is_told_to_say_so() -> None:

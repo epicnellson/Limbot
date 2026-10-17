@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import httpx
+from app.access import Role, audiences_for
 from app.config import Settings
 from app.core.whatsapp import WhatsAppAPIError, WhatsAppCloudClient
+from app.db.contacts import AccessDecision, AccessResolver
 from app.llm.base import LLMProvider, ProviderRequestError
 from app.llm.pipeline import LLMPipeline
 from app.llm.types import LLMRequest, LLMResponse
 from app.models.whatsapp import WhatsAppWebhook
 from app.services import message_handler
-from app.services.answer import AnswerService
+from app.services.answer import ACCESS_DENIED, AnswerService
 from app.services.dedupe import MessageDeduplicator
 
 from conftest import _base_settings, counter_value, text_message_payload
@@ -70,6 +72,7 @@ async def deliver(
     settings: Settings,
     whatsapp: RecordingWhatsApp,
     answers: AnswerService,
+    access: AccessResolver | None = None,
 ) -> None:
     await message_handler.handle_webhook(
         payload,
@@ -78,6 +81,7 @@ async def deliver(
         dedupe=make_dedupe(),
         answers=answers,
         http=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: None)),
+        access=access,
     )
 
 
@@ -299,3 +303,74 @@ async def test_a_sender_keeps_their_conversation_between_messages() -> None:
 
 def test_the_fallback_text_is_short_enough_for_a_whatsapp_bubble() -> None:
     assert len(message_handler.NOTHING_TO_SAY) < 1024
+
+
+class StubResolver(AccessResolver):
+    """Resolves every sender to one canned decision, or fails on demand."""
+
+    def __init__(self, decision: AccessDecision | None, *, error: Exception | None = None) -> None:
+        self._decision = decision
+        self._error = error
+        self.seen: list[str] = []
+
+    async def resolve(self, wa_id: str) -> AccessDecision:
+        self.seen.append(wa_id)
+        if self._error is not None:
+            raise self._error
+        assert self._decision is not None
+        return self._decision
+
+
+async def test_a_blocked_sender_is_refused_without_buying_a_completion() -> None:
+    settings = _base_settings(ai_enabled=True)
+    answers, provider = make_answers()
+    whatsapp = RecordingWhatsApp()
+    resolver = StubResolver(AccessDecision(role=Role.BLOCKED, student_id=None, audiences=()))
+    before = counter_value("limbot_answers_total", provider="none", tools="none")
+
+    await deliver(
+        body_for(), settings=settings, whatsapp=whatsapp, answers=answers, access=resolver
+    )
+
+    assert resolver.seen == [SENDER]
+    assert provider.calls == 0
+    assert whatsapp.sent == [(SENDER, ACCESS_DENIED)]
+    assert counter_value("limbot_answers_total", provider="none", tools="none") - before == 1
+
+
+async def test_an_access_lookup_failure_falls_back_to_public_rather_than_dropping() -> None:
+    settings = _base_settings(ai_enabled=True)
+    answers, provider = make_answers()
+    whatsapp = RecordingWhatsApp()
+    resolver = StubResolver(None, error=RuntimeError("postgres went away"))
+
+    await deliver(
+        body_for(), settings=settings, whatsapp=whatsapp, answers=answers, access=resolver
+    )
+
+    assert provider.calls == 1
+    assert whatsapp.sent == [(SENDER, "Linear algebra is at 10:00 in B204.")]
+
+
+async def test_the_role_reaches_the_answer_pipeline() -> None:
+    settings = _base_settings(ai_enabled=True)
+    answers, _provider = make_answers()
+    whatsapp = RecordingWhatsApp()
+    resolver = StubResolver(
+        AccessDecision(role=Role.STUDENT, student_id=7, audiences=audiences_for(Role.STUDENT))
+    )
+    seen: list[str] = []
+
+    original = answers.answer
+
+    async def spy(question: str, context: object, **kwargs: object) -> object:
+        seen.append(context.role)  # type: ignore[attr-defined]
+        return await original(question, context, **kwargs)  # type: ignore[arg-type]
+
+    answers.answer = spy  # type: ignore[method-assign]
+
+    await deliver(
+        body_for(), settings=settings, whatsapp=whatsapp, answers=answers, access=resolver
+    )
+
+    assert seen == ["student"]
