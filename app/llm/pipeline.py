@@ -11,7 +11,7 @@ import httpx
 from app import metrics
 from app.config import Settings
 from app.core.circuit import CircuitBreaker
-from app.llm.base import LLMProvider, ProviderError, ProviderTimeoutError
+from app.llm.base import LLMProvider, ProviderConfigError, ProviderError, ProviderTimeoutError
 from app.llm.gemini import gemini_provider
 from app.llm.openai_compat import groq_provider, openai_compatible_provider
 from app.llm.types import LLMRequest, LLMResponse
@@ -49,9 +49,10 @@ class LLMPipeline:
     The rules, in one place, because they are the whole point of the module:
 
     * a tier whose circuit is not accepting requests is skipped without a network call;
-    * a transient provider failure trips that tier's circuit and moves to the next tier;
-    * a non-transient failure, such as a rejected request or a bad key, propagates immediately,
-      since every other tier would fail the same way;
+    * a per-tier failure — transient, or a rejected credential — trips that tier's circuit and
+      moves on to the next tier;
+    * only a malformed request, which every tier would reject the same way, propagates
+      immediately;
     * a successful completion resets the circuit and returns.
     """
 
@@ -171,10 +172,15 @@ class LLMPipeline:
                 result = "timeout"
             elif provider_error.status_code == 429:
                 result = "rate_limited"
+            elif isinstance(provider_error, ProviderConfigError):
+                result = "unauthorized"
             else:
                 result = "error"
             metrics.LLM_CALLS.labels(provider=provider.name, result=result).inc()
-            if not provider_error.transient:
+
+            if not provider_error.fallthrough:
+                # A malformed request is rejected the same way by every tier, so the chain stops
+                # here rather than spend another provider call on a doomed request.
                 attempts.append(
                     AttemptOutcome(
                         provider=provider.name,
@@ -188,18 +194,22 @@ class LLMPipeline:
                     extra={"context": {"provider": provider.name, "error": str(provider_error)}},
                 )
                 raise provider_error
+
+            # Everything else moves on. A credential error (401/403) belongs here: the bad key is
+            # this provider's, and the next tier holds a different one, so a revoked key on tier
+            # one must not take the whole bot offline.
             breaker.record_failure()
             last_error = provider_error
             attempts.append(
                 AttemptOutcome(
                     provider=provider.name,
                     tier=provider.tier,
-                    result="transient_error",
+                    result="transient_error" if provider_error.transient else "unauthorized",
                     detail=str(provider_error),
                 )
             )
             logger.warning(
-                "provider failed transiently, falling back",
+                "provider failed, falling back",
                 extra={
                     "context": {
                         "provider": provider.name,

@@ -368,10 +368,12 @@ Postgres are reported but only fail readiness under their own `*_REQUIRED` flags
 stack stays green without them.
 
 **Providers degrade, they do not default out.** Every provider sits behind a circuit breaker
-that opens after `AI_CIRCUIT_FAILURE_THRESHOLD` consecutive transient failures. An open tier is
-skipped in favour of the next; non-transient errors (bad keys, model limits) surface without
-fallback. Answering with "I could not get a response" is reserved for when every tier has
-failed.
+that opens after `AI_CIRCUIT_FAILURE_THRESHOLD` consecutive failures and is then skipped in
+favour of the next tier. A credential error (`401`/`403`) falls through too: the bad key belongs
+to that provider and the next tier holds a different one, so a revoked key on tier one does not
+take the bot offline. Only a malformed request — which every tier would reject the same way —
+ends the turn without a fallback. Answering with "I could not get a response" is reserved for
+when every tier has failed.
 
 **Tools cannot write.** The database connection is forced read-only at the protocol level, so a
 wrong model turn cannot mutate a row. Timeouts, argument schemas with

@@ -11,13 +11,21 @@ from app.llm.types import LLMRequest, LLMResponse
 class ProviderError(RuntimeError):
     """Base class for provider failures.
 
-    ``transient`` is the decision the resilience pipeline acts on: transient failures trip the
-    circuit and fall through to the next tier, while non-transient failures propagate, because
-    a malformed request would fail the same way on every provider and retrying only adds
-    latency.
+    Two class-level decisions shape how the pipeline reacts:
+
+    ``fallthrough`` is whether the chain should try the next tier. It is true for everything
+    except a :class:`ProviderRequestError`: a malformed request would be rejected by every tier,
+    so only that case ends the turn immediately. A credential error in particular must fall
+    through, because the bad key belongs to this provider and the next tier holds a different
+    one.
+
+    ``transient`` describes the failure itself: a temporary condition such as a 5xx, a timeout
+    or a rate limit, as opposed to a rejected request or a bad credential. It only labels the
+    attempt in the logs and metrics; every fallthrough failure trips the provider's circuit.
     """
 
     transient: ClassVar[bool] = True
+    fallthrough: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -34,15 +42,23 @@ class ProviderError(RuntimeError):
 
 
 class ProviderConfigError(ProviderError):
-    """Credentials or endpoint missing or rejected. Non-transient: the tier stays broken."""
+    """Credentials or endpoint missing or rejected. Non-transient, but provider-specific.
+
+    A 401/403 means this provider's key is wrong; the next tier has its own key, so the chain
+    falls through rather than ending the turn (``fallthrough`` stays true).
+    """
 
     transient: ClassVar[bool] = False
 
 
 class ProviderRequestError(ProviderError):
-    """The provider rejected the request itself. Non-transient."""
+    """The provider rejected the request itself. Non-transient, and non-fallthrough.
+
+    A malformed request would be rejected by every tier the same way, so the chain stops here.
+    """
 
     transient: ClassVar[bool] = False
+    fallthrough: ClassVar[bool] = False
 
 
 class ProviderRateLimitError(ProviderError):

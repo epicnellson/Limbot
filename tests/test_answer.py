@@ -12,6 +12,7 @@ from app.llm.base import (
     ProviderConfigError,
     ProviderError,
     ProviderRateLimitError,
+    ProviderRequestError,
     ProviderServerError,
 )
 from app.llm.pipeline import LLMPipeline, NoProviderAvailable
@@ -508,16 +509,34 @@ async def test_a_rate_limited_tier_falls_through_to_the_backup_and_records_the_f
 async def test_a_rejected_request_is_not_replayed_on_the_next_tier() -> None:
     settings = _base_settings(ai_enabled=True)
     rejected = ScriptedProvider(
-        [], name="groq", tier=1, error=ProviderConfigError("401 bad key", provider="groq")
+        [], name="groq", tier=1, error=ProviderRequestError("400 bad request", provider="groq")
     )
     backup = ScriptedProvider([says("should not be reached")], name="gemini", tier=2)
     service = AnswerService(settings, LLMPipeline(settings, providers=[rejected, backup]))
 
     async with mock_client() as http:
-        with pytest.raises(ProviderConfigError):
+        with pytest.raises(ProviderRequestError):
             await service.answer("hello", STUDENT, http=http)
 
     assert backup.requests == []
+
+
+async def test_a_revoked_key_falls_over_to_the_backup_provider() -> None:
+    """A bad key on the first tier must not take the bot offline; the next tier answers."""
+    settings = _base_settings(ai_enabled=True)
+    revoked = ScriptedProvider(
+        [], name="groq", tier=1, error=ProviderConfigError("401 bad key", provider="groq")
+    )
+    backup = ScriptedProvider([says("answered by the backup")], name="gemini", tier=2)
+    service = AnswerService(settings, LLMPipeline(settings, providers=[revoked, backup]))
+
+    async with mock_client() as http:
+        answer = await service.answer("hello", STUDENT, http=http)
+
+    assert answer.text == "answered by the backup"
+    assert answer.provider == "gemini"
+    assert revoked.requests != []
+    assert backup.requests != []
 
 
 async def test_the_no_provider_error_carries_every_attempt_for_the_logs() -> None:

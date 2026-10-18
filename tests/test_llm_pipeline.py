@@ -6,6 +6,7 @@ from app.config import Settings
 from app.core.circuit import CircuitBreaker, CircuitState
 from app.llm.base import (
     LLMProvider,
+    ProviderConfigError,
     ProviderRateLimitError,
     ProviderRequestError,
     ProviderServerError,
@@ -109,7 +110,7 @@ async def test_rate_limited_tier_falls_through(settings: Settings) -> None:
     assert pipeline.breakers["groq"].snapshot().consecutive_failures == 1
 
 
-async def test_non_transient_failure_stops_the_chain(settings: Settings) -> None:
+async def test_a_request_error_stops_the_chain(settings: Settings) -> None:
     groq = StubProvider(
         "groq", 1, failures=[ProviderRequestError("400 bad request", provider="groq")]
     )
@@ -122,6 +123,41 @@ async def test_non_transient_failure_stops_the_chain(settings: Settings) -> None
 
     assert gemini.calls == 0
     assert pipeline.breakers["groq"].state is CircuitState.CLOSED
+
+
+async def test_a_revoked_key_falls_through_to_the_next_tier(settings: Settings) -> None:
+    """A 401 is this provider's key, not the request, so the chain must keep going."""
+    groq = StubProvider(
+        "groq", 1, failures=[ProviderConfigError("401", provider="groq", status_code=401)]
+    )
+    gemini = StubProvider("gemini", 2)
+    pipeline = make_pipeline([groq, gemini], settings)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: None)) as client:
+        response = await pipeline.complete(REQUEST, http=client)
+
+    assert response.provider == "gemini"
+    assert groq.calls == 1
+    assert gemini.calls == 1
+    assert pipeline.breakers["groq"].snapshot().consecutive_failures == 1
+    assert pipeline.breakers["gemini"].state is CircuitState.CLOSED
+
+
+async def test_every_tier_unauthorized_raises_with_an_attempt_trail(settings: Settings) -> None:
+    groq = StubProvider(
+        "groq", 1, failures=[ProviderConfigError("401", provider="groq", status_code=401)]
+    )
+    gemini = StubProvider(
+        "gemini", 2, failures=[ProviderConfigError("401", provider="gemini", status_code=401)]
+    )
+    pipeline = make_pipeline([groq, gemini], settings)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: None)) as client:
+        with pytest.raises(NoProviderAvailable) as excinfo:
+            await pipeline.complete(REQUEST, http=client)
+
+    outcomes = [(attempt.provider, attempt.result) for attempt in excinfo.value.attempts]
+    assert outcomes == [("groq", "unauthorized"), ("gemini", "unauthorized")]
 
 
 async def test_open_circuit_is_skipped_without_a_request(settings: Settings) -> None:
@@ -264,6 +300,31 @@ async def test_a_rate_limited_fallback_records_its_own_reason(settings: Settings
         from_provider="groq",
         to_provider="gemini",
         reason="rate_limited",
+    )
+
+    assert after - before == 1
+
+
+async def test_a_credential_fallback_records_its_own_reason(settings: Settings) -> None:
+    groq = StubProvider(
+        "groq", 1, failures=[ProviderConfigError("401", provider="groq", status_code=401)]
+    )
+    gemini = StubProvider("gemini", 2)
+    pipeline = make_pipeline([groq, gemini], settings)
+
+    before = counter_value(
+        "limbot_provider_fallbacks_total",
+        from_provider="groq",
+        to_provider="gemini",
+        reason="unauthorized",
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: None)) as client:
+        await pipeline.complete(REQUEST, http=client)
+    after = counter_value(
+        "limbot_provider_fallbacks_total",
+        from_provider="groq",
+        to_provider="gemini",
+        reason="unauthorized",
     )
 
     assert after - before == 1
