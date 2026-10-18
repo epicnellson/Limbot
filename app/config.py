@@ -96,7 +96,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: SecretStr | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.8-flash"
 
     tier3_base_url: str = "http://ollama:11434/v1"
     tier3_api_key: SecretStr | None = None
