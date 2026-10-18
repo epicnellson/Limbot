@@ -14,8 +14,10 @@ records.
 | Async work | `app/core/tasks.py` — detached tasks, bounded concurrency, graceful drain on shutdown |
 | Outbound HTTP | One `httpx.AsyncClient` per process, connection pooling, timeouts, retry policy that respects idempotency |
 | LLM pipeline | `app/llm/` — Groq, Gemini and an OpenAI-compatible tier, per-tier circuit breakers, tool calling, per-request fallback |
-| Tools | Read-only student records (timetable, deadlines, exams, grades, submissions) via Postgres, injected context |
-| RAG | `app/rag/` — chunking, `fastembed` embeddings, Qdrant retrieval with a score threshold, `/debug/knowledge` ingest |
+| Access control | `app/access.py` — a role per number resolved from the verified `wa_id`; audience-filtered retrieval and a per-role tool gate enforced both in the advertised specs and again on dispatch |
+| Tools | Read-only student records (timetable, deadlines, exams, grades, submissions) via Postgres, injected context, hidden from anyone below `student` |
+| RAG | `app/rag/` — chunking, `fastembed` embeddings, Qdrant retrieval with a score threshold and a per-chunk audience, `/debug/knowledge` ingest |
+| Admin content | `POST /admin/knowledge` — bearer-guarded ingest of public, student or staff notes without a redeploy |
 | Conversation memory | `app/conversation/` — recent turns per student, fed back into the prompt |
 | Observability | `prometheus_client` registry, `/metrics`, circuit / LLM / tool / RAG / eval series, provisioned Grafana dashboard |
 | Evaluation | `app/eval/` — 15 synthetic cases graded in CI on every prompt change, provider distribution reported |
@@ -28,7 +30,8 @@ records.
 app/
   main.py                 app factory, lifespan wiring, middleware
   config.py               pydantic-settings, multi-tier validation, fail-fast production checks
-  runtime.py              AiRuntime: builds pipeline, tools, retrieval, ingestor, database
+  access.py               roles, audiences, and the retrieval/tool gate policy
+  runtime.py              AiRuntime: builds pipeline, tools, retrieval, ingestor, database, access resolver
   metrics.py              Prometheus registry and all series
   logging_config.py       single stdout handler, JSON or text
   core/
@@ -42,16 +45,16 @@ app/
   llm/                    types, base client, openai_compat, gemini, pipeline/fallback
   rag/                    chunker, retrieval pipeline, knowledge ingestor
   tools/                  JSON-schema tool calling, registry, student tools
-  db/                     pooled asyncpg connection, read-only student repository
+  db/                     pooled asyncpg connection, read-only student + contacts repositories, access resolver
   conversation/           per-student recent turn memory
   models/whatsapp.py      webhook payload schemas
   services/
     message_handler.py    inbound message processing and routing
     answer.py             orchestrates retrieval + tools + LLM into a reply
     dedupe.py             TTL message id cache
-  api/routes/             health, webhooks, metrics, debug, knowledge
+  api/routes/             health, webhooks, metrics, debug, knowledge, admin
   middleware/metrics.py   latency, request counters, access log
-db/                       schema.sql + seed.sql applied by the postgres container
+db/                       schema.sql, seed.sql, link_student.sql, contacts.sql applied by the postgres container
 infra/
   prometheus/prometheus.yml
   grafana/provisioning/   datasource + dashboard providers
@@ -159,15 +162,74 @@ docker compose up -d qdrant postgres
 
 Inbound text is read, marked read, and handed to `AnswerService.answer`. It:
 
-1. pulls the last few turns of the conversation with that student,
-2. retrieves up to `RAG_TOP_K` chunks above `RAG_SCORE_THRESHOLD` from Qdrant,
-3. calls the LLM through the provider chain (Groq → Gemini → tier3, each behind a circuit
-   breaker) allowing up to `AI_MAX_TOOL_ROUNDS` of tool calls,
-4. appends the reply to the conversation and sends it back via the Cloud API.
+1. resolves the sender's role and audiences from the verified `wa_id` (see below) and refuses a
+   blocked number outright,
+2. pulls the last few turns of the conversation with that student,
+3. retrieves up to `RAG_TOP_K` chunks above `RAG_SCORE_THRESHOLD` from Qdrant, filtered to the
+   audiences the role may see,
+4. advertises only the tools the role is allowed to call, then calls the LLM through the
+   provider chain (Groq → Gemini → tier3, each behind a circuit breaker) allowing up to
+   `AI_MAX_TOOL_ROUNDS` of tool calls,
+5. appends the reply to the conversation and sends it back via the Cloud API.
 
 Tools only ever read student data: the pool opens with `default_transaction_read_only`, so
 nothing a model invents can mutate a row. Identities come from the verified `wa_id`, never
-from what the model says.
+from what the model says, and a tool the role may not use is refused even if the model asks
+for it by name.
+
+## Access control
+
+Every number maps to exactly one role, resolved server-side from the verified `wa_id` — never
+from anything the model or the sender says, so it cannot be spoofed by a message.
+
+| Role | Gets | Notes |
+| --- | --- | --- |
+| `public` | `public` knowledge only | The default for a number with no row. No records, no student or staff material. |
+| `student` | `public` + `student` knowledge, and the record tools | Granted implicitly by a `students` row with that `wa_id`. |
+| `tester` | same as `student` | Easy to grant and revoke while testing. |
+| `staff` | `student` + `staff` knowledge | |
+| `admin` | same as `staff` | Intended for operators. |
+| `blocked` | nothing | Refused outright, even when a `students` row exists. |
+
+Resolution order: an explicit `contacts` row always wins; otherwise a linked `students` row is a
+`student`; otherwise `public`. An unrecognised role value fails closed to `blocked`, so a typo in
+the table cannot quietly expose the FAQ/RAG path.
+
+The gate is applied twice: `ToolRegistry.specs(role)` hides a tool the role may not use, and
+`ToolRegistry.dispatch` re-checks the role so a model that names a forbidden tool anyway gets a
+refusal rather than data. Retrieval is filtered the same way, by the `audience` payload on each
+chunk, so a `public` sender never reaches `student` or `staff` material.
+
+**The bot only ever reads these tables** — its Postgres pool opens read-only. Roles live in the
+`contacts` table (seeded for the owner by `db/contacts.sql`) and are changed from a psql session:
+
+```bash
+# grant a role, or link a non-student to a students row
+docker exec -i limbot-postgres-1 psql -U limbot -d limbot -c \
+  "INSERT INTO contacts (wa_id, role) VALUES ('23234094465', 'tester')
+     ON CONFLICT (wa_id) DO UPDATE SET role = 'tester', updated_at = NOW();"
+
+# revoke the override (the number falls back to student/public automatically)
+docker exec -i limbot-postgres-1 psql -U limbot -d limbot -c \
+  "DELETE FROM contacts WHERE wa_id = '23234094465';"
+```
+
+A role change takes effect on that number's next message — no restart.
+
+Content is tagged with an audience when it is ingested, so the same store can hold public
+announcements, student-only notes and staff material. The `/debug/knowledge` route (local only)
+defaults to `public`; the bearer-guarded admin route can pick any audience:
+
+```bash
+curl -X POST http://localhost:8000/admin/knowledge \
+  -H "Authorization: Bearer $ADMIN_API_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"title":"Exam timetable","source":"office","audience":"student","text":"..."}'
+```
+
+`audience` is one of `public`, `student` or `staff`. The route answers `401` without a valid
+token, `503` when `ADMIN_API_TOKEN` is unset or retrieval is disabled, `400` when the ingestor
+refuses the text, and `502` when embedding fails.
 
 ## Evaluation
 
@@ -241,16 +303,17 @@ required to boot except an app secret unless you enable the AI pipeline.
 | `RAG_SCORE_THRESHOLD` | `0.35` | Below this a chunk is ignored and the bot answers without context |
 | `KNOWLEDGE_CHUNK_CHARS`, `KNOWLEDGE_CHUNK_OVERLAP` | `900`, `150` | Ingestion chunking |
 
-Load material with `DEBUG_ENDPOINTS=true`:
+Load material with `DEBUG_ENDPOINTS=true`; `audience` is optional and defaults to `public`:
 
 ```bash
 curl -X POST http://localhost:8000/debug/knowledge \
   -H 'content-type: application/json' \
-  -d '{"title":"Week 3","source":"la.pdf","text":"Eigenvalues satisfy A v = lambda v ..."}'
+  -d '{"title":"Week 3","source":"la.pdf","audience":"public","text":"Eigenvalues satisfy A v = lambda v ..."}'
 ```
 
 The response includes a `document_id` hash: re-posting the same material replaces its chunks
-instead of duplicating them.
+instead of duplicating them. To load `student` or `staff` material, use the bearer-guarded
+`POST /admin/knowledge` instead (see Access control).
 
 ### Student data
 
@@ -260,11 +323,18 @@ instead of duplicating them.
 | `POSTGRES_POOL_MIN/MAX_SIZE` | `1`/`5` | Pool bounds |
 | `CONVERSATION_*` | — | Turn count, TTL and conversation-capacity for memory |
 
+### Access control
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ADMIN_API_TOKEN` | — | Bearer token for `POST /admin/knowledge`; when unset the route answers `503` rather than accept an unauthenticated write |
+
 ### WhatsApp, HTTP, tasks, observability
 
 As in Phase 1: `WHATSAPP_*` (secret, token, access token, phone number id), `HTTP_*` retry and
-pool tuning, `BACKGROUND_*` concurrency, `MESSAGE_DEDUPE_*`, `QDRANT_REQUIRED`,
-`DEBUG_ENDPOINTS`, `BIND_ADDRESS`. The full list is in `.env.example`.
+pool tuning (`HTTP_LOCAL_ADDRESS` pins outbound sockets to IPv4 for hosts with broken IPv6),
+`BACKGROUND_*` concurrency, `MESSAGE_DEDUPE_*`, `QDRANT_REQUIRED`, `DEBUG_ENDPOINTS`,
+`BIND_ADDRESS`. The full list is in `.env.example`.
 
 ## Verifying the webhook by hand
 
@@ -307,6 +377,11 @@ failed.
 wrong model turn cannot mutate a row. Timeouts, argument schemas with
 `additionalProperties: false`, and a four-call round cap keep a runaway loop from costing money.
 
+**Access is decided once, server-side.** The role comes from the verified `wa_id` and is applied
+to both retrieval (the audience filter) and the tool registry (the advertised specs and a
+dispatch-time re-check). Nothing the sender or the model says can raise it, and an unrecognised
+role value fails closed to `blocked`.
+
 **One worker.** The dedupe cache, circuit breaker state, the task pool and the metrics
 registry all live in the process. Scaling out means more containers, not `--workers`.
 
@@ -316,5 +391,6 @@ duration. Payloads, API keys and full answers are never logged, and secrets stay
 
 ## Next
 
-Media download handling, per-conversation custom state, and stronger RLS in Postgres for a
-multi-tenant deployment.
+Rate limiting per `wa_id` (a public sender can currently drive LLM spend), media download
+handling, per-conversation custom state, a multi-writer path for enrolling students without a
+psql session, and stronger RLS in Postgres for a multi-tenant deployment.
